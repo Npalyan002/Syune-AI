@@ -161,5 +161,5 @@ experimental, retained for compatibility, and disabled by default.
 
 See [known limitations](docs/known_limitations.md) for the complete list.
 
-SYUNE 1.0.0 exposes Public API v1 and is licensed under the
+SYUNE 1.0.1 exposes Public API v1 and is licensed under the
 [Apache License 2.0](LICENSE).

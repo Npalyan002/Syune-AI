@@ -1,6 +1,6 @@
 [project]
 name = "syune"
-version = "1.0.0"
+version = "1.0.1"
 description = "A governed memory, context and model-execution runtime for AI systems"
 keywords = [
     "ai",
@@ -22,6 +22,13 @@ dependencies = [
     "mcp>=2,<3",
     "pypdf>=6,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Npalyan002/Syune-AI"
+Repository = "https://github.com/Npalyan002/Syune-AI.git"
+Documentation = "https://github.com/Npalyan002/Syune-AI/tree/main/docs"
+Issues = "https://github.com/Npalyan002/Syune-AI/issues"
+Changelog = "https://github.com/Npalyan002/Syune-AI/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

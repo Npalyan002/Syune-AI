@@ -64,6 +64,7 @@ default and are outside the stable v1 product contract.
 
 ## Release
 
+- [v1.0.1 release notes](release/v1.0.1.md)
 - [v1.0.0 release notes](release/v1.0.0.md)
 - [Release-candidate validation](release/RC_VALIDATION.md)
 - [Source-tree audit](release/SOURCE_TREE_AUDIT.md)

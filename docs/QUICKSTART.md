@@ -6,7 +6,7 @@ Create a clean environment and install the published candidate (or a locally bui
 
 ```powershell
 py -3.12 -m venv .quickstart-venv
-.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.0
+.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.1
 .\.quickstart-venv\Scripts\syune.exe --version
 ```
 

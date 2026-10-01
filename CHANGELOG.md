@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 - 2026-10-01
+
+- Align package and runtime release metadata on version 1.0.1.
+- Add canonical Homepage, Repository, Documentation, Issues and Changelog URLs to
+  the package metadata.
+- Add a release-triggered, OIDC-based PyPI Trusted Publishing workflow that builds
+  the exact stable release tag.
+- Add v1.0.1 publication-alignment release documentation.
+
+Runtime semantics and the stable Public API v1 contract are unchanged from 1.0.0.
+
 ## 1.0.0 - 2026-09-30
 
 - Promote the validated Lean v1 release candidate to the stable 1.0.0 product contract.
