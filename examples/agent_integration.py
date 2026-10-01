@@ -1,12 +1,13 @@
-"""Generic host using only the stable top-level Lean v1 API."""
-from pathlib import Path
+"""Generic agent task → governed context → chosen model integration."""
+from __future__ import annotations
 import argparse
+from pathlib import Path
 
 from syune import ContextRequest, RememberRequest, Syune
 
 
 def chosen_model(task: str, context: str) -> str:
-    """Replace this stand-in with the host's model or ModelGateway call."""
+    """Replace this deterministic stand-in with your model or ModelGateway call."""
     return f"Task: {task}\nGoverned context supplied: {bool(context.strip())}"
 
 
@@ -26,8 +27,10 @@ def main() -> None:
             agent_id="briefing-agent",
             purpose="release-briefing",
             task_id="briefing-001",
+            max_chars=2_000,
         ))
-        print(chosen_model(args.task, context.data["rendered"]))
+        response = chosen_model(args.task, context.data["rendered"])
+        print(response)
         print("audit correlation:", context.correlation_id)
 
 

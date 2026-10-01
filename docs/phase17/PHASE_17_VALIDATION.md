@@ -8,7 +8,7 @@ Production code modified: NO.
 
 ## Scope and baseline
 
-Date: 2026-09-25. Repository: E:/AI/SYUNE. Baseline HEAD: e2d9ea5f49d4eb138e37531ac1d9eae7016bc0ed. Initial tracked working tree clean. Phase 16 PASS is the canonical historical milestone; this audit does not revise that historical acceptance decision.
+Date: 2026-09-25. Repository: local SYUNE source checkout. Baseline HEAD: e2d9ea5f49d4eb138e37531ac1d9eae7016bc0ed. Initial tracked working tree clean. Phase 16 PASS is the canonical historical milestone; this audit does not revise that historical acceptance decision.
 
 The requested docs/phase17 directory is used. Previous phases used top-level docs/PHASE_* reports, but no repository instruction mandates that placement; the user's explicit Phase 17 path is preserved. No source, contract, package, dependency, schema, runtime config or historical phase artifact was changed. No production fix, migration, provider installation, refactor, commit or push was performed.
 

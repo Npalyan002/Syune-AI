@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "syune": {
-      "command": "syune",
-      "args": ["mcp", "serve"],
-      "env": {"SYUNE_STATE_ROOT": "${SYUNE_STATE_ROOT}", "SYUNE_STUDY_ROOTS": "${SYUNE_STUDY_ROOTS}"}
-    }
-  }
-}

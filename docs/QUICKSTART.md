@@ -24,17 +24,18 @@ CURRENT and AS_OF retrieval, history, lifecycle, durable audit, shutdown, restar
 and persisted retrieval. It requires no model credential. On POSIX use the
 equivalent `.quickstart-venv/bin/python` and `.quickstart-venv/bin/syune` paths.
 
-For an explicit isolated instance:
+For an explicit isolated instance, choose any writable absolute path:
 
 ```powershell
-syune init --state-root C:/Users/me/syune-state
-syune health --state-root C:/Users/me/syune-state
+$state = Join-Path $env:TEMP "my-isolated-syune-state"
+syune init --state-root $state
+syune health --state-root $state
 ```
 
 To launch the Lean local stdio MCP gateway:
 
 ```powershell
-$env:SYUNE_STATE_ROOT = "C:/Users/me/syune-state"
+$env:SYUNE_STATE_ROOT = $state
 syune mcp serve
 ```
 

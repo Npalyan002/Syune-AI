@@ -1,20 +1,27 @@
-# Tested Lean v1 examples
+# Lean v1 examples
 
-- `python -m syune.quickstart --state-root PATH` covers memory, governed context,
-  provenance, revision/history, lifecycle, audit and restart using the installed package.
-- `host_integration/host.py` demonstrates a generic host boundary.
+These examples use stable Lean v1 APIs only. They do not initialize experimental
+cognition, learning, Council, Planner, or Executive services.
 
-Minimal agent flow:
+Install the package and initialize a separate state directory for each memory example:
 
-```python
-from syune import ContextRequest, Syune
-
-with Syune.open(state_root="C:/syune-state", model_gateway=gateway) as runtime:
-    context = runtime.context(ContextRequest("agent task", agent_id="agent-1", purpose="assist"))
-    # Construct a ModelExecutionRequest whose user input includes context.data["rendered"].
-    response = runtime.model(model_request)
+```console
+pip install syune
+syune init --state-root .example-state
+python examples/memory.py --state-root .example-state
 ```
 
-The host owns the task and final response. SYUNE supplies governed context and reliable
-model execution; it does not become an autonomous agent. ModelGateway construction is
-provider-specific; deterministic gateway tests run without credentials.
+| Example | Demonstrates |
+|---|---|
+| [`memory.py`](memory.py) | Remember, governed retrieval, full provenance, and restart |
+| [`governed_context.py`](governed_context.py) | Owner-scoped memory, agent identity, purpose, bounded context, and denial |
+| [`revision_history.py`](revision_history.py) | Revision, `CURRENT`, `AS_OF`, history, and lineage |
+| [`model_gateway.py`](model_gateway.py) | Provider-neutral structured output with a deterministic local adapter and no credentials |
+| [`agent_integration.py`](agent_integration.py) | Generic agent task → governed context → chosen model flow |
+
+`host_integration/host.py` preserves the generic host-boundary compatibility example using
+the same stable Lean flow and top-level imports only.
+
+Every program is runnable without a live provider. The ModelGateway example uses a small
+deterministic adapter to expose gateway concepts; replace it with an explicitly configured
+provider adapter in production. Never embed provider credentials in source files.

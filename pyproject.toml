@@ -2,6 +2,18 @@
 name = "syune"
 version = "1.0.0"
 description = "A governed memory, context and model-execution runtime for AI systems"
+keywords = [
+    "ai",
+    "ai-agents",
+    "llm",
+    "memory",
+    "rag",
+    "context",
+    "authorization",
+    "provenance",
+    "mcp",
+    "model-gateway",
+]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

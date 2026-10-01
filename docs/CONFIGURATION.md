@@ -6,10 +6,10 @@ Example TOML (paths must be absolute):
 
 ```toml
 [state]
-root = "C:/Users/me/syune-state"
+root = "<absolute-state-path>"
 
 [study]
-roots = ["C:/Users/me/syune-library"]
+roots = ["<absolute-library-path>"]
 
 [retrieval]
 max_results = 16
