@@ -6,23 +6,29 @@ Create a clean environment and install the published candidate (or a locally bui
 
 ```powershell
 py -3.12 -m venv .quickstart-venv
-.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.1
+.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.2
 .\.quickstart-venv\Scripts\syune.exe --version
 ```
 
-Initialize the default user-local state and verify it:
+Run the quickstart directly. On first use it initializes a demo state under the system
+temporary directory, then safely reuses that state on later runs:
 
 ```powershell
-$state = Join-Path $env:TEMP "syune-v1-quickstart"
-.\.quickstart-venv\Scripts\syune.exe init --state-root $state
-.\.quickstart-venv\Scripts\python.exe -m syune.quickstart --state-root $state
-.\.quickstart-venv\Scripts\syune.exe health --state-root $state
+.\.quickstart-venv\Scripts\python.exe -m syune.quickstart
+```
+
+To keep demo state in a chosen location, pass an absolute or relative path. The
+quickstart wrapper resolves relative CLI paths before it calls the strict SDK boundary:
+
+```powershell
+.\.quickstart-venv\Scripts\python.exe -m syune.quickstart --state-root .\syune-state
 ```
 
 The workflow performs remember, governed context with FULL provenance, revision,
 CURRENT and AS_OF retrieval, history, lifecycle, durable audit, shutdown, restart,
-and persisted retrieval. It requires no model credential. On POSIX use the
-equivalent `.quickstart-venv/bin/python` and `.quickstart-venv/bin/syune` paths.
+and persisted retrieval. It reports whether state was newly created and confirms clean
+close. It requires no model credential. On POSIX use the equivalent
+`.quickstart-venv/bin/python` and `.quickstart-venv/bin/syune` paths.
 
 For an explicit isolated instance, choose any writable absolute path:
 

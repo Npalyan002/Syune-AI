@@ -1,6 +1,6 @@
 [project]
 name = "syune"
-version = "1.0.1"
+version = "1.0.2"
 description = "A governed memory, context and model-execution runtime for AI systems"
 keywords = [
     "ai",

@@ -97,14 +97,15 @@ policy, health, evidence, and audit without coupling the memory layer to one pro
 Requires Python 3.12 or newer (below 4).
 
 ```console
-pip install syune
-syune init --state-root .syune-demo
+pip install syune==1.0.2
+python -m syune.quickstart --state-root ./.syune-demo
 ```
 
 ```python
+from pathlib import Path
 from syune import ContextRequest, ProvenanceMode, Syune
 
-with Syune.open(state_root=".syune-demo") as memory:
+with Syune.open(state_root=Path(".syune-demo").resolve()) as memory:
     stored = memory.remember("The deployment window is Friday at 18:00 UTC.")
     context = memory.context(ContextRequest(
         "deployment window",
@@ -161,5 +162,5 @@ experimental, retained for compatibility, and disabled by default.
 
 See [known limitations](docs/known_limitations.md) for the complete list.
 
-SYUNE 1.0.1 exposes Public API v1 and is licensed under the
+SYUNE 1.0.2 exposes Public API v1 and is licensed under the
 [Apache License 2.0](LICENSE).

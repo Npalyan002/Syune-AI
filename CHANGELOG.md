@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 - 2026-10-01
+
+- Make `python -m syune.quickstart` initialize and run successfully from a fresh
+  installation without a separate `syune init` step.
+- Resolve relative quickstart state paths before entering the absolute-path-only SDK
+  boundary and add a safe temporary demo-state default.
+- Report expected state/configuration mistakes as actionable CLI errors.
+- Add fresh, relative, absolute, preinitialized and restart/reuse regression coverage.
+
+This is an onboarding/CLI patch. Runtime semantics outside the quickstart wrapper are
+unchanged.
+
 ## 1.0.1 - 2026-10-01
 
 - Align package and runtime release metadata on version 1.0.1.

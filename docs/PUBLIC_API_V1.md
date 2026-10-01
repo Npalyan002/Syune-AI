@@ -1,6 +1,6 @@
 # Public API v1
 
-Package `1.0.1` exposes the frozen public API version `1`. `Syune` is synchronous,
+Package `1.0.2` exposes the frozen public API version `1`. `Syune` is synchronous,
 lifecycle-managed, persistent across restart, and returns typed result envelopes with a
 correlation ID and serializable `data`.
 
