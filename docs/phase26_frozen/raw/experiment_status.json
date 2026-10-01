@@ -1,1 +1,0 @@
-{"phase":26,"status":"BLOCKED_EXTERNAL","protocol_version":"EVAL_PROTOCOL_V1","protocol_frozen":true,"protocol_sha256":"BE1494213768A6BC8417E9932ECA3E0FFB2C72EA2FA3763D5552B542E4648CB5","real_model_calls":0,"metrics":null,"reason":["repository absent","provider credential absent"]}

@@ -1,11 +1,11 @@
 # ADR-0010 - Observation as a Non-Epistemic Memory Entity
 
 **Status:** ACCEPTED
-**Baseline:** additive Memory Kernel ontology correction for Phase 03
+**Applies to:** SYUNE v1 compatibility surface
 
 ## Context
 
-Phase 03 must retain perceived source content without declaring that content true. The existing MemoryTrace could reference only Concept, Claim, Evidence, Episode, or Procedure IDs. A literal perceived fragment fits none of those semantic types. Memory cannot depend on Study's PerceivedBlock.
+The compatibility ingestion surface must retain perceived source content without declaring that content true. A literal perceived fragment is not a claim or concept, and Memory cannot depend on Study's parser model.
 
 ## Decision
 
@@ -19,6 +19,4 @@ The safe flow is Source -> Study PerceivedBlock -> Memory Observation -> MemoryT
 
 ## Consequences and boundaries
 
-Phase 03 may create Observations from perceived blocks while preserving SourceId and precise locators. It may not automatically create trusted Claims or Concepts. Observation may participate in generic associations, but this ADR introduces no semantic derivation, retrieval, contradiction reasoning, or execution.
-
-This accepted ADR authorizes only the minimal Memory Kernel contract extension. Study parsing, Retrieval, RAG, embeddings, LLM calls, MCP, agent dispatch, and Executive behavior remain outside this patch. The Phase 00 shared-memory, provenance, and L1 ADVISORY invariants remain binding.
+Study may create Observations from perceived blocks while preserving SourceId and precise locators. It may not automatically create trusted Claims or Concepts. Observation may participate in generic associations, but this decision grants no semantic derivation or execution authority.

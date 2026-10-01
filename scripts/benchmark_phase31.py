@@ -8,7 +8,7 @@ from benchmarks.phase31_execution import Runner
 from benchmarks.phase31_reporting import analyze
 
 def main():
- p=argparse.ArgumentParser();p.add_argument("mode",choices=("freeze","fake","live","analyze"));p.add_argument("--out",type=Path,default=Path("docs/phase31/evidence/live_v1"));a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument("mode",choices=("freeze","fake","live","analyze"));p.add_argument("--out",type=Path,default=Path("artifacts/benchmarks/phase31/live_v1"));a=p.parse_args()
  if a.mode=="freeze": result=freeze(a.out/"freeze")
  elif a.mode in ("fake","live"):
   freeze(a.out/"freeze");runner=Runner(a.out,a.mode=="live")

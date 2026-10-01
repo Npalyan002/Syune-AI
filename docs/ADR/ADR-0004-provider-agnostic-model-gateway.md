@@ -1,18 +1,16 @@
 # ADR-0004 — Provider Agnostic Model Gateway
 
 **Status:** Accepted  
-**Baseline:** v001 / Baseline 0.1
+**Applies to:** SYUNE v1
 
 ## Decision
 
-Replaceable LLM/VLM providers sit behind a model gateway with provider-independent cognitive contracts.
+Replaceable model providers sit behind ModelGateway and implement provider-independent request, result, policy, and failure contracts.
 
 ## Rationale
 
-Providers process tasks but are not SYUNE.
+The public API must not inherit provider-specific transport, schema, retry, or failure behavior. Provider selection remains deployment policy.
 
 ## Consequences and boundaries
 
-Provider choice and API bindings are deferred.
-
-See [Constitution](../SYUNE_CONSTITUTION_v001.md) and [Blueprint](../SYUNE_BLUEPRINT_v001.md).
+Adapters may translate transport details but cannot bypass authorization, budgets, structured validation, evidence sanitization, or semantic-commit idempotency. See [ModelGateway](../architecture/MODEL_GATEWAY.md).

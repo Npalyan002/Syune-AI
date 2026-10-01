@@ -2,4 +2,4 @@
 
 Future persistence interface boundary. No database product selected.
 
-Phase 01 placeholder only. No runtime implementation. See [architecture](../../../../docs/SYUNE_ARCHITECTURE_v001.md) and [constitution](../../../../docs/SYUNE_CONSTITUTION_v001.md).
+This compatibility namespace has no active runtime implementation. Stable storage behavior is described in the [Lean v1 architecture](../../../docs/architecture/LEAN_V1_ARCHITECTURE.md).

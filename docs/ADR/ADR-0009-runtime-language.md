@@ -1,12 +1,12 @@
 # ADR-0009 — Runtime Language
 
 **Status:** ACCEPTED
-**Baseline:** v001 / Baseline 0.1
+**Applies to:** SYUNE v1
 **Decision:** Python 3.12+ with uv for the primary SYUNE runtime.
 
 ## Context
 
-Phase 00 froze SYUNE's architecture without selecting a runtime language. Phase 01 kept the repository language-neutral. This decision establishes the implementation language and dependency manager for future phases; it does not authorize cognitive runtime work in this update.
+SYUNE requires one supported implementation language and dependency workflow for its runtime and public package.
 
 ## Decision
 
@@ -26,8 +26,4 @@ Keeping Rust optional avoids splitting cognitive behavior across two runtimes be
 
 ## Consequences and boundaries
 
-Future Python package/tooling scaffolding may follow this accepted decision, subject to the scope of the phase that authorizes it. This ADR update itself adds no package files, dependencies, Rust code, cognitive implementation, or Phase 02 work.
-
-Any Rust acceleration must have benchmark evidence, a narrowly defined boundary, and no independent cognitive authority. Provider adapters must continue to respect provider-agnostic contracts. The Phase 00 memory, provenance, domain-profile, governance, and L1 ADVISORY invariants remain unchanged.
-
-See [Constitution](../SYUNE_CONSTITUTION_v001.md), [Architecture](../SYUNE_ARCHITECTURE_v001.md), and [Blueprint](../SYUNE_BLUEPRINT_v001.md).
+Any Rust acceleration must have benchmark evidence, a narrowly defined boundary, and no independent runtime authority. Provider adapters continue to respect provider-neutral contracts. See the [Lean v1 architecture](../architecture/LEAN_V1_ARCHITECTURE.md).

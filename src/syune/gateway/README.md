@@ -1,5 +1,5 @@
 # gateway
 
-External cognitive interface boundary. MCP is first; Phase 05 provides local stdio tools.
+External interface boundary. MCP provides local stdio tools.
 
-Five explicit L1 ADVISORY tools delegate to Study, Memory, and Retrieval. See `docs/PHASE_05_MCP_GATEWAY.md`.
+The allowlisted tools expose bounded product and compatibility capabilities. See [MCP v1](../../../docs/MCP_V1.md) and [ModelGateway](../../../docs/architecture/MODEL_GATEWAY.md).

@@ -4,28 +4,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $failures = [System.Collections.Generic.List[string]]::new()
 $requiredDocs = @(
-    'SYUNE_BLUEPRINT_v001.md','SYUNE_CONSTITUTION_v001.md',
-    'SYUNE_ARCHITECTURE_v001.md','SYUNE_MEMORY_MODEL_v001.md',
-    'SYUNE_STUDY_SYSTEM_v001.md','SYUNE_RETRIEVAL_MODEL_v001.md',
-    'SYUNE_CONTRACTS_v001.md','SYUNE_EVENT_MODEL_v001.md',
-    'SYUNE_GOVERNANCE_v001.md','SYUNE_EVALS_v001.md',
-    'SYUNE_ROADMAP_v001.md','PHASE_00_VALIDATION.md',
-    'PHASE_03_STUDY_SYSTEM.md','PHASE_03_VALIDATION.md',
-    'PHASE_03A_DURABLE_MEMORY.md','PHASE_03A_VALIDATION.md',
-    'PHASE_04_RETRIEVAL_ASSOCIATIVE_ACTIVATION.md','PHASE_04_VALIDATION.md',
-    'PHASE_05_MCP_GATEWAY.md','PHASE_05_VALIDATION.md',
-    'PHASE_06_SHADOW_INTEGRATION.md','PHASE_06_VALIDATION.md',
-    'PHASE_07_LEARNING_CONSOLIDATION.md','PHASE_07_VALIDATION.md',
-    'PHASE_08_COGNITIVE_CORE.md','PHASE_08_VALIDATION.md',
-    'PHASE_09_DOMAIN_ACTIVATION_PROFILES.md','PHASE_09_VALIDATION.md',
-    'PHASE_10_MULTIMODAL_STUDY.md','PHASE_10_VALIDATION.md',
-    'PHASE_11_COGNITIVE_COUNCIL.md','PHASE_11_VALIDATION.md',
-    'PHASE_12_EXECUTIVE_CONTRACTS_L2_PLANNER.md','PHASE_12_VALIDATION.md',
-    'PHASE_13_SUPERVISED_EXECUTIVE_L3.md','PHASE_13_VALIDATION.md',
-    'PHASE_14_SYSTEM_HARDENING_E2E.md','PHASE_14_VALIDATION.md','SYUNE_RELEASE_READINESS_v1.md',
-    'PHASE_15_PRODUCTIZATION_PACKAGING.md','PHASE_15_VALIDATION.md','QUICKSTART.md','CONFIGURATION.md','LOCAL_OPERATIONS.md',
-    'PUBLIC_API_V1.md','PYTHON_SDK.md','MCP_V1.md','HOST_INTEGRATION_PROTOCOL_V1.md','COMPATIBILITY_MATRIX.md',
-    'PHASE_16_PUBLIC_INTERFACES_SDK.md','PHASE_16_VALIDATION.md'
+    'README.md','QUICKSTART.md','CONFIGURATION.md','LOCAL_OPERATIONS.md',
+    'PUBLIC_API_V1.md','PYTHON_SDK.md','MCP_V1.md','HOST_INTEGRATION_PROTOCOL_V1.md',
+    'COMPATIBILITY_MATRIX.md','known_limitations.md','threat_model.md',
+    'architecture/LEAN_V1_ARCHITECTURE.md','architecture/MODEL_GATEWAY.md',
+    'operations/model-gateway-policy.md','operations/observability.md','operations/recovery.md',
+    'security/model-gateway-data-policy.md','benchmarks/LEAN_V1_VALIDATION.md',
+    'benchmarks/HISTORICAL_EVALUATION_SUMMARY.md','research/README.md','release/v1.0.0.md'
 )
 $modules = @(
     'core','memory','study','retrieval','cognition','domains','council',
@@ -44,26 +29,16 @@ foreach ($name in $modules) {
     }
 }
 $adrRoot = Join-Path $RepositoryRoot 'docs/ADR'
-for ($n = 1; $n -le 8; $n++) {
-    $pattern = ('ADR-{0:D4}-*.md' -f $n)
-    $found = @(Get-ChildItem -LiteralPath $adrRoot -Filter $pattern -File -ErrorAction SilentlyContinue)
-    if ($found.Count -ne 1 -or (Get-Content -LiteralPath $found[0].FullName -Raw) -notmatch 'Status:.*Accepted') {
-        $failures.Add("Accepted ADR missing or ambiguous: $pattern")
+foreach ($name in @('ADR-0004-provider-agnostic-model-gateway.md','ADR-0005-study-idempotency-and-provenance.md','ADR-0009-runtime-language.md','ADR-0010-observation-memory-entity.md')) {
+    $path = Join-Path $adrRoot $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Content -LiteralPath $path -Raw) -notmatch 'Status:.*ACCEPTED') {
+        $failures.Add("Current accepted ADR missing or ambiguous: $name")
     }
-}
-$proposal = Join-Path $adrRoot 'ADR-0009-runtime-language.md'
-if (-not (Test-Path -LiteralPath $proposal -PathType Leaf) -or
-    (Get-Content -LiteralPath $proposal -Raw) -notmatch 'Status:.*ACCEPTED') {
-    $failures.Add('ADR-0009 must be ACCEPTED')
-}
-$observationAdr = Join-Path $adrRoot 'ADR-0010-observation-memory-entity.md'
-if (-not (Test-Path -LiteralPath $observationAdr -PathType Leaf) -or
-    (Get-Content -LiteralPath $observationAdr -Raw) -notmatch 'Status:.*ACCEPTED') {
-    $failures.Add('ADR-0010 must be ACCEPTED')
 }
 $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'src') -Recurse -File | Where-Object { $_.FullName -notmatch '[\/]__pycache__[\/]' -and $_.Extension -ne '.pyc' })
 $allowedCode = @(
     'src/syune/__init__.py',
+    'src/syune/quickstart.py',
     'src/syune/api/__init__.py','src/syune/api/model.py','src/syune/api/errors.py','src/syune/api/version.py','src/syune/api/capabilities.py','src/syune/api/serialization.py',
     'src/syune/sdk/__init__.py','src/syune/sdk/client.py','src/syune/sdk/session.py',
     'src/syune/product/__init__.py','src/syune/product/config.py','src/syune/product/schema.py','src/syune/product/state.py','src/syune/product/runtime.py',
@@ -98,12 +73,14 @@ $allowedCode = @(
 foreach ($file in $sourceFiles) {
     if ($file.Name -eq 'README.md') { continue }
     $relative = $file.FullName.Substring($RepositoryRoot.TrimEnd('\').Length + 1).Replace('\', '/')
-    if ($relative -notin $allowedCode) {
+    $allowedSourcePattern = '^src/syune/(api|sdk|product|cli|evals|core|memory|study|retrieval|gateway/mcp|learning|cognition|perception|council|executive|audit|context|model_gateway)/[^/]+\.py$'
+    if ($relative -notin @('src/syune/__init__.py','src/syune/quickstart.py','src/syune/release.py','src/syune/retrieval_integrations.py') -and
+        $relative -notmatch $allowedSourcePattern) {
         $failures.Add("Unauthorized runtime source file: $relative")
         continue
     }
     $body = Get-Content -LiteralPath $file.FullName -Raw
-    if ($relative -notlike 'src/syune/product/*' -and $relative -notlike 'src/syune/cli/*' -and $relative -notlike 'src/syune/api/*' -and $relative -notlike 'src/syune/sdk/*' -and $relative -notlike 'src/syune/evals/*' -and $relative -notlike 'src/syune/gateway/mcp/*' -and $relative -notlike 'src/syune/council/*' -and $relative -notlike 'src/syune/executive/*' -and
+    if ($relative -ne 'src/syune/retrieval_integrations.py' -and $relative -notlike 'src/syune/model_gateway/*' -and $relative -notlike 'src/syune/product/*' -and $relative -notlike 'src/syune/cli/*' -and $relative -notlike 'src/syune/api/*' -and $relative -notlike 'src/syune/sdk/*' -and $relative -notlike 'src/syune/evals/*' -and $relative -notlike 'src/syune/gateway/mcp/*' -and $relative -notlike 'src/syune/council/*' -and $relative -notlike 'src/syune/executive/*' -and
         $body -match '(?im)^\s*(from|import)\s+(syune\.(study|cognition|domains|council|executive|gateway|providers|storage)|openai|anthropic|langchain|chromadb|faiss|qdrant|neo4j|pinecone|mcp|requests|httpx|aiohttp|urllib|socket)(\b|\.)') {
         $failures.Add("Forbidden higher-layer/provider dependency: $relative")
     }
@@ -198,9 +175,15 @@ $publicRuntime = @(
 if ($publicRuntime -match '(SQLite|Repository|Store|Adapter|SupervisedExecutiveService)') {
     $failures.Add('Public API namespace exposes internal repository/store implementation')
 }
-foreach ($path in @('pyproject.toml','uv.lock','docs/PHASE_02_MEMORY_KERNEL.md','docs/PHASE_02_VALIDATION.md')) {
+$productConfig = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'src/syune/product/config.py') -Raw
+if ($productConfig -notmatch 'learning:\s*bool\s*=\s*False' -or $productConfig -notmatch 'research_cognition:\s*bool\s*=\s*False') {
+    $failures.Add('Experimental learning and research cognition must remain disabled by default')
+}
+foreach ($path in @('pyproject.toml','uv.lock','contracts/schemas/public/v1','src/syune/product','src/syune/api','src/syune/sdk','src/syune/model_gateway')) {
     if (-not (Test-Path -LiteralPath (Join-Path $RepositoryRoot $path) -PathType Leaf)) {
-        $failures.Add("Missing Phase 02 artifact: $path")
+        if (-not (Test-Path -LiteralPath (Join-Path $RepositoryRoot $path) -PathType Container)) {
+            $failures.Add("Missing Lean v1 product boundary: $path")
+        }
     }
 }
 $activeNames = @(Get-ChildItem -LiteralPath $RepositoryRoot -File) + $sourceFiles
@@ -210,8 +193,8 @@ foreach ($file in $activeNames) {
     }
 }
 $readme = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'README.md') -Raw
-if ($readme -notmatch 'L3 SUPERVISED EXECUTIVE' -or $readme -notmatch 'cannot directly dispatch agents') {
-    $failures.Add('Root README lacks explicit L3 supervised/dispatch boundary')
+if ($readme -notmatch 'Research cognition and learning are disabled by default' -or $readme -notmatch 'experimental, retained for compatibility, and disabled by default') {
+    $failures.Add('Root README lacks the explicit disabled-by-default research boundary')
 }
 $configFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'config') -Recurse -File)
 foreach ($file in $configFiles) {
@@ -223,4 +206,4 @@ if ($failures.Count -gt 0) {
     $failures | ForEach-Object { Write-Error $_ }
     exit 1
 }
-Write-Output 'PHASE 16 architecture boundary checks: PASS'
+Write-Output 'SYUNE Lean v1 architecture boundary checks: PASS'

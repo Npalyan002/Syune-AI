@@ -30,6 +30,7 @@ coverage/
 data/
 logs/
 tmp/
+artifacts/
 .syune/
 *.db
 *.sqlite

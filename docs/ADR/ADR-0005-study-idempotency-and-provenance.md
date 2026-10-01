@@ -1,7 +1,7 @@
 # ADR-0005 — Study Idempotency And Provenance
 
 **Status:** Accepted  
-**Baseline:** v001 / Baseline 0.1
+**Applies to:** SYUNE v1 compatibility surface
 
 ## Decision
 
@@ -13,6 +13,4 @@ Retry, rename, revision, retraction, and audit must preserve history without dup
 
 ## Consequences and boundaries
 
-No ingestion or parser runtime is authorized in Phase 00.
-
-See [Constitution](../SYUNE_CONSTITUTION_v001.md) and [Blueprint](../SYUNE_BLUEPRINT_v001.md).
+Ingestion remains an explicit caller action. It does not silently delete sources, duplicate durable observations on retry, or promote perceived content to factual truth. This compatibility surface is outside the minimal Lean workflow but remains supported by the v1 package.

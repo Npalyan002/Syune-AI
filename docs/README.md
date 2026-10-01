@@ -1,8 +1,7 @@
 # SYUNE documentation
 
 The public v1 contract is the Lean runtime: governed memory, bounded context, reliable
-model execution, and durable audit. Historical phase material is retained for
-reproducibility but is not the recommended learning path.
+model execution, and durable audit. This index is the canonical product documentation map.
 
 ## Getting started
 
@@ -15,6 +14,7 @@ reproducibility but is not the recommended learning path.
 ## Concepts
 
 - [Lean v1 product boundary](product_refactor/V1_PRODUCT_BOUNDARY.md)
+- [Experimental compatibility modules](product_refactor/EXPERIMENTAL_MODULES.md)
 - [Compatibility matrix](COMPATIBILITY_MATRIX.md)
 - [Known limitations](known_limitations.md)
 
@@ -35,19 +35,26 @@ reproducibility but is not the recommended learning path.
 - [Security policy](../SECURITY.md)
 - [Threat model](threat_model.md)
 - [Security preservation](product_refactor/SECURITY_PRESERVATION.md)
+- [ModelGateway data policy](security/model-gateway-data-policy.md)
 
 ## Architecture
 
 - [Lean v1 architecture](architecture/LEAN_V1_ARCHITECTURE.md)
 - [Lean v1 API](product_refactor/LEAN_V1_API.md)
-- [ModelGateway contract](phase29/MODEL_GATEWAY_CONTRACT.md)
+- [ModelGateway](architecture/MODEL_GATEWAY.md)
+
+## Operations
+
+- [ModelGateway policy](operations/model-gateway-policy.md)
+- [Observability](operations/observability.md)
+- [Recovery](operations/recovery.md)
 
 ## Benchmarks
 
 - [Lean v1 validation](benchmarks/LEAN_V1_VALIDATION.md)
 - [Historical evaluation summary](benchmarks/HISTORICAL_EVALUATION_SUMMARY.md)
 
-## Research and experimental material
+## Research
 
 - [Research context](research/README.md)
 - [Experimental modules](product_refactor/EXPERIMENTAL_MODULES.md)
@@ -60,9 +67,3 @@ default and are outside the stable v1 product contract.
 - [v1.0.0 release notes](release/v1.0.0.md)
 - [Release-candidate validation](release/RC_VALIDATION.md)
 - [Source-tree audit](release/SOURCE_TREE_AUDIT.md)
-
-## Historical development documents
-
-Documents named `PHASE_*` and the numbered `phase*/` directories record development and
-validation history. They remain available for reproducibility and compatibility review,
-but they are not primary product documentation and may describe superseded states.
