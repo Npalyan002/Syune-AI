@@ -1,0 +1,10 @@
+{"probe": "P01", "sdk_utility": 0.2, "mcp_utility": 0.0}
+.{"probe": "P02", "old_revision_retrievable": true}
+.{"probe": "P03", "retraction_flag": true, "still_retrievable": true}
+.{"probe": "P04", "write_accepted": true, "offline_audit_issues": ["memory:source_missing"]}
+.{"probe": "P05", "closed_runtime_health": "HEALTHY"}
+.{"probe": "P06", "future_observation_returned": true}
+.{"probe": "P07", "sdk_materialization_check": null, "recall_principal_contract": false}
+.{"probe": "P08", "members": 2, "full_memory_enumerations": 3}
+.
+8 passed in 48.53s

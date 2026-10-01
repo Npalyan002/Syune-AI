@@ -1,0 +1,16 @@
+{
+  "baseline_commit": "e2d9ea5f49d4eb138e37531ac1d9eae7016bc0ed",
+  "baseline_files_checked": 304,
+  "changed_baseline_files": [],
+  "missing_reports": [],
+  "broken_local_links": [],
+  "trailing_whitespace": [],
+  "capability_rows": 45,
+  "gap_rows": 31,
+  "matrix_errors": [],
+  "gap_errors": [],
+  "new_files_outside_audit": [],
+  "git_diff_check_exit": 0,
+  "git_diff_check_output": "",
+  "status": "PASS"
+}

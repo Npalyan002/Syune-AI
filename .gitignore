@@ -1,0 +1,44 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config/local/
+# Editor and system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# Build and cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+node_modules/
+.venv/
+.venv*/
+venv/
+coverage/
+.coverage
+# Runtime/data artifacts
+data/
+logs/
+tmp/
+.syune/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local validation workspaces (never release inputs)
+.test-tmp/
+.validation-tmp/
+phase24-full-tmp/
+docs/evals/phase19/*pytest*/
+docs/evals/phase20/*tmp*/
+docs/evals/phase21/*tmp*/

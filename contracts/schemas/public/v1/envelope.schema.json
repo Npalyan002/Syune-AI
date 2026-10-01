@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://syune.local/schemas/public/v1/envelope.schema.json",
+  "title": "SYUNE Public API v1 Envelope",
+  "type": "object",
+  "required": ["correlation_id", "data", "public_api_version"],
+  "properties": {"correlation_id": {"type": "string", "minLength": 1, "maxLength": 128}, "data": {"type": "object"}, "public_api_version": {"const": "1"}},
+  "additionalProperties": true
+}

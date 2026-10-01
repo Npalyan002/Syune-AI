@@ -1,0 +1,20 @@
+{
+  "model": "gpt-5.4-mini-2026-03-17",
+  "levels_percent": [
+    25,
+    50,
+    75,
+    100,
+    125,
+    150
+  ],
+  "strategies": [
+    "PLAIN_JSON",
+    "NATIVE_STRUCTURED",
+    "COMPACT_SCHEMA"
+  ],
+  "max_output_tokens": 256,
+  "generation": "request one numbered synthetic token per target unit; target units equal percentage of 160-word calibrated visible capacity",
+  "calls": 18,
+  "hard_cost_usd": 0.25
+}

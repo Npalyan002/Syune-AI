@@ -1,0 +1,9 @@
+{
+  "model": "gpt-5.4-mini-2026-03-17",
+  "gateway_commits": 1,
+  "cognitive_commits": 1,
+  "effects": 1,
+  "decision": "ABSTAIN",
+  "cost_usd": 0.00011475,
+  "audit_linked": true
+}

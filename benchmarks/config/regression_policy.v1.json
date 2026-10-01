@@ -1,0 +1,9 @@
+{
+  "policy_version": "1.0.0",
+  "max_task_success_regression": 0.02,
+  "max_recall_regression": 0.03,
+  "max_false_memory_count": 0,
+  "max_p95_latency_ms": 250.0,
+  "max_total_tokens": 100000,
+  "required_permission_violations": 0
+}

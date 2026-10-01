@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "allowed_classifications": ["V1_CORE", "V1_OPTIONAL", "EXPERIMENTAL", "RESEARCH", "DEPRECATE", "REMOVE"],
+  "capabilities": [
+    {"capability":"typed memory and provenance","module":"syune.memory","classification":"V1_CORE"},
+    {"capability":"authorization and access audit","module":"syune.memory.security","classification":"V1_CORE"},
+    {"capability":"temporal/version metadata","module":"syune.memory.truth","classification":"V1_CORE"},
+    {"capability":"lexical governed retrieval","module":"syune.retrieval","classification":"V1_CORE"},
+    {"capability":"memory lifecycle","module":"syune.memory.lifecycle","classification":"V1_CORE"},
+    {"capability":"context assembly","module":"syune.context","classification":"V1_CORE"},
+    {"capability":"model gateway","module":"syune.model_gateway","classification":"V1_CORE"},
+    {"capability":"study/source ingestion","module":"syune.study","classification":"V1_CORE"},
+    {"capability":"SDK and lifecycle CLI","module":"syune.sdk, syune.cli, syune.product","classification":"V1_CORE"},
+    {"capability":"MCP transport","module":"syune.gateway.mcp","classification":"V1_OPTIONAL"},
+    {"capability":"semantic/Qdrant retrieval","module":"syune.retrieval.semantic","classification":"V1_OPTIONAL"},
+    {"capability":"associative graph expansion","module":"syune.retrieval","classification":"V1_OPTIONAL"},
+    {"capability":"advanced contradiction and consolidation","module":"syune.memory, syune.learning","classification":"V1_OPTIONAL"},
+    {"capability":"learning and plasticity","module":"syune.learning","classification":"EXPERIMENTAL"},
+    {"capability":"cognitive transaction ledger","module":"syune.model_gateway.cognitive_transaction","classification":"EXPERIMENTAL"},
+    {"capability":"cognitive profiles","module":"syune.cognition","classification":"RESEARCH"},
+    {"capability":"council synthesis","module":"syune.council","classification":"RESEARCH"},
+    {"capability":"planner and supervised executive","module":"syune.executive","classification":"RESEARCH"},
+    {"capability":"public cognize/council/plan methods","module":"syune.sdk","classification":"DEPRECATE"},
+    {"capability":"cognitive-first product positioning","module":"current product docs","classification":"REMOVE"}
+  ]
+}

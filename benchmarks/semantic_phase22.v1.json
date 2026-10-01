@@ -1,0 +1,12 @@
+{
+  "dataset_id": "syune-real-semantic-v1",
+  "construction": "Human-authored labels; independent of embedding implementation",
+  "cases": [
+    {"id":"paraphrase-1","query":"Who is accountable for moving Mercury?","positive":"Avery owns the Mercury migration.","hard_negatives":["Avery observes Mercury analytics.","Mercury migration has no assigned owner."]},
+    {"id":"synonym-1","query":"The car launch safety procedure","positive":"Automobile release safety checklist.","hard_negatives":["Car launch sales forecast.","Aircraft release safety checklist."]},
+    {"id":"concept-1","query":"prevent credentials from remaining valid after departure","positive":"Revoke access tokens when an employee leaves.","hard_negatives":["Rotate long-lived service credentials annually.","Archive employee departure records."]},
+    {"id":"indirect-1","query":"where work waits when the primary service is down","positive":"The failover queue buffers jobs during an outage.","hard_negatives":["The primary queue drains jobs during normal operation.","The outage report lists completed work."]},
+    {"id":"terminology-1","query":"myocardial infarction response","positive":"Heart attack emergency protocol.","hard_negatives":["Cardiac fitness assessment.","Emergency protocol for heat exhaustion."]},
+    {"id":"entity-description-1","query":"the red planet rover project","positive":"Mars rover telemetry belongs to Ares.","hard_negatives":["Red project telemetry belongs to Venus.","Mars satellite telemetry belongs to Hermes."]}
+  ]
+}

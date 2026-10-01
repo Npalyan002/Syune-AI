@@ -1,0 +1,23 @@
+{
+  "version": "phase30-v1",
+  "production_paths": [
+    {"id":"production-text-generation-gateway","location":"src/syune/model_gateway","kind":"generative_text","classification":"P0","migration_state":"GATEWAY_AUTHORITATIVE","direct_provider_transport":false},
+    {"id":"cognitive-transaction-application","location":"src/syune/model_gateway/cognitive_transaction.py","kind":"committed_result_application","classification":"P0","migration_state":"GATEWAY_AUTHORITATIVE","direct_provider_transport":false},
+    {"id":"multimodal-perception-providers","location":"src/syune/perception/providers.py; src/syune/perception/router.py","kind":"vision_audio_video_perception","classification":"P1","migration_state":"DIRECT","reason":"separate typed modality contract; no structured cognitive mutation"},
+    {"id":"openai-compatible-embeddings","location":"src/syune/retrieval_integrations.py:OpenAICompatibleEmbeddingProvider","kind":"embedding","classification":"P2","migration_state":"DIRECT","reason":"non-generative retrieval primitive"},
+    {"id":"qdrant-vector-index","location":"src/syune/retrieval_integrations.py:QdrantVectorIndex","kind":"vector_database","classification":"P2","migration_state":"DIRECT","reason":"retrieval storage, not model generation"}
+  ],
+  "audited_non_model_subsystems": [
+    {"id":"verified-learning","location":"src/syune/learning/verified.py","classification":"P0","migration_state":"REMOVED","reason":"deterministic; no model execution path exists"},
+    {"id":"organizational-learning","location":"src/syune/learning/organizational.py","classification":"P0","migration_state":"REMOVED","reason":"deterministic; no model execution path exists"},
+    {"id":"cognitive-core","location":"src/syune/cognition","classification":"P0","migration_state":"REMOVED","reason":"deterministic inference; no model execution path exists"},
+    {"id":"cognitive-council","location":"src/syune/council","classification":"P0","migration_state":"REMOVED","reason":"deterministic analysis/synthesis; no model execution path exists"},
+    {"id":"planner","location":"src/syune/executive/planner.py","classification":"P0","migration_state":"REMOVED","reason":"deterministic planning; no model execution path exists"},
+    {"id":"supervised-executive","location":"src/syune/executive","classification":"P0","migration_state":"REMOVED","reason":"capability execution, not model generation; owns separate action retry semantics"}
+  ],
+  "benchmark_only": ["benchmarks/phase26.py","benchmarks/phase27.py","benchmarks/phase28_provider.py","benchmarks/phase28r1_execution.py","benchmarks/phase28r2_execution.py","scripts/validate_phase29_live.py","scripts/validate_phase29_repair.py","scripts/validate_phase29_truncation.py"],
+  "test_only": ["tests/phase29","tests/phase30","deterministic fake adapters"],
+  "deprecated": [],
+  "dead": [],
+  "unknown": []
+}

@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "families": {
+    "recall": ["G04", "G20"],
+    "temporal": ["G02"],
+    "contradiction": ["G03", "G31"],
+    "provenance": ["G13"],
+    "associative": ["G04", "G31"],
+    "multi_hop": ["G04", "G31"],
+    "update": ["G02", "G12"],
+    "abstention": ["G20"],
+    "permission": ["G01"],
+    "cross_agent": ["G10"],
+    "learning": ["G09", "G28"],
+    "compression": ["G11"],
+    "task_success": ["G14", "G20"],
+    "context_efficiency": ["G04", "G20"],
+    "performance": ["G05", "G17", "G21"]
+  }
+}

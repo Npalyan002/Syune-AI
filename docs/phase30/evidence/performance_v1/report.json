@@ -1,0 +1,19 @@
+{
+  "samples": 200,
+  "legacy_contract_ms": {
+    "p50": 0.025399989681318402,
+    "p95": 0.032400013878941536
+  },
+  "gateway_transaction_ms": {
+    "p50": 412.26545002427883,
+    "p95": 505.241000035312
+  },
+  "gateway_added_ms": {
+    "p50": 412.2400500345975,
+    "p95": 505.2086000214331
+  },
+  "provider_latency_ms": 0.2,
+  "input_tokens": 2000,
+  "output_tokens": 1000,
+  "cost_usd": 0.003
+}

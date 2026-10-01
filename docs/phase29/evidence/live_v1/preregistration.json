@@ -1,0 +1,25 @@
+{
+  "version": "phase29.1-live-v1",
+  "model": "gpt-5.4-mini-2026-03-17",
+  "strategies": [
+    "PLAIN_JSON",
+    "NATIVE_STRUCTURED",
+    "COMPACT_SCHEMA",
+    "PLAIN_JSON_REPAIR",
+    "NATIVE_REPAIR",
+    "TWO_STAGE"
+  ],
+  "roles": [
+    "CLASSIFICATION",
+    "DECISION",
+    "SYNTHESIS",
+    "KNOWLEDGE_CONSTRUCTION",
+    "VERIFICATION",
+    "PLANNING",
+    "SCORING"
+  ],
+  "primary_calls": 42,
+  "maximum_provider_calls": 60,
+  "hard_cost_usd": 0.5,
+  "synthetic_non_sensitive": true
+}

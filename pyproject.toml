@@ -1,0 +1,61 @@
+[project]
+name = "syune"
+version = "1.0.0"
+description = "A governed memory, context and model-execution runtime for AI systems"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<4"
+dependencies = [
+    "mcp>=2,<3",
+    "pypdf>=6,<7",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+syune = "syune.cli.app:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/syune"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/syune",
+    "/pyproject.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/SYUNE_V1_FEATURE_FREEZE",
+    "/docs/QUICKSTART.md",
+    "/docs/installation.md",
+    "/docs/backup_restore.md",
+    "/docs/migration.md",
+    "/docs/threat_model.md",
+    "/docs/known_limitations.md",
+    "/docs/release",
+    "/docs/CONFIGURATION.md",
+    "/docs/LOCAL_OPERATIONS.md",
+    "/docs/PHASE_15_PRODUCTIZATION_PACKAGING.md",
+    "/docs/PUBLIC_API_V1.md",
+    "/docs/PYTHON_SDK.md",
+    "/docs/MCP_V1.md",
+    "/docs/HOST_INTEGRATION_PROTOCOL_V1.md",
+    "/docs/COMPATIBILITY_MATRIX.md",
+    "/docs/product_refactor",
+    "/benchmarks/lean_product.py",
+    "/docs/PHASE_16_PUBLIC_INTERFACES_SDK.md",
+    "/docs/PHASE_16_VALIDATION.md",
+    "/examples/host_integration",
+    "/examples/*.py",
+    "/contracts/schemas/public/v1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

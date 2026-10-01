@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://syune.local/schemas/public/v1/error.schema.json",
+  "title": "SYUNE Public Error v1",
+  "type": "object",
+  "required": ["code", "message", "category", "retryable", "blocked", "details", "correlation_id", "public_api_version"],
+  "properties": {
+    "code": {"type": "string"}, "message": {"type": "string"},
+    "category": {"enum": ["INVALID_REQUEST", "NOT_INITIALIZED", "NOT_FOUND", "UNAVAILABLE", "DEGRADED", "BLOCKED", "APPROVAL_REQUIRED", "CONFLICT", "LIMIT_EXCEEDED", "UNSUPPORTED_VERSION", "INTERNAL"]},
+    "retryable": {"type": "boolean"}, "blocked": {"type": "boolean"}, "details": {"type": "object"},
+    "correlation_id": {"type": ["string", "null"]}, "public_api_version": {"const": "1"}
+  },
+  "additionalProperties": true
+}

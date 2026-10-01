@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "classifications": {
+    "V1_CORE": ["typed memory and provenance", "authorization and access audit", "temporal/version metadata", "lexical governed retrieval", "memory lifecycle", "context assembly", "model gateway", "study/source ingestion", "SDK and lifecycle CLI"],
+    "V1_OPTIONAL": ["MCP transport", "semantic/Qdrant retrieval", "associative graph expansion", "advanced contradiction and consolidation"],
+    "EXPERIMENTAL": ["learning and plasticity", "cognitive transaction ledger"],
+    "RESEARCH": ["cognitive profiles", "council synthesis", "planner and supervised executive"],
+    "DEPRECATE": ["public cognize/council/plan methods"],
+    "REMOVE": ["cognitive-first product positioning"]
+  },
+  "unknown": []
+}

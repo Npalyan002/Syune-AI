@@ -1,0 +1,15 @@
+{
+  "model": "gpt-5.4-mini-2026-03-17",
+  "maximum_trigger_attempts": 3,
+  "eligible": [
+    "INVALID_JSON",
+    "SCHEMA_INVALID"
+  ],
+  "forbidden": [
+    "SEMANTIC_INVALID",
+    "low confidence",
+    "unfavorable result"
+  ],
+  "hard_cost_usd": 0.05,
+  "marker": "ALPHA-17"
+}
