@@ -61,7 +61,7 @@ flowchart LR
 See the [Lean v1 architecture](docs/architecture/LEAN_V1_ARCHITECTURE.md) for boundaries,
 storage, detachability modes, and the default-disabled research surfaces.
 
-## Connect SYUNE to your agent stack
+## Connect SYUNE
 
 SYUNE is model- and agent-framework independent. Connect it to Codex, Claude Code,
 Claude Desktop, or another stdio MCP host through the canonical Lean MCP server, or
@@ -72,6 +72,8 @@ Using SYUNE for MCP memory and context does **not** inherently require a separat
 API credential. The host continues to reason with its own model access; SYUNE supplies
 governed persistent memory and bounded context. ModelGateway is an optional second mode
 for applications that explicitly configure provider execution.
+
+Run syune setup and then syune doctor to prepare persistent state, save the exact installed MCP tuple, and validate a real handshake. Setup never edits third-party configuration.
 
 Start with [MCP host integration](docs/integrations/MCP_HOSTS.md), the
 [MCP contract](docs/MCP_V1.md), or the [Python SDK](docs/PYTHON_SDK.md).
@@ -103,7 +105,7 @@ policy, health, evidence, and audit without coupling the memory layer to one pro
 Requires Python 3.12 or newer (below 4).
 
 ```console
-pip install syune==1.0.3
+pip install syune==1.1.0
 python -m syune.quickstart --state-root ./.syune-demo
 ```
 
@@ -172,5 +174,5 @@ experimental, retained for compatibility, and disabled by default.
 
 See [known limitations](docs/known_limitations.md) for the complete list.
 
-SYUNE 1.0.3 exposes Public API v1 and is licensed under the
+SYUNE 1.1.0 exposes Public API v1 and is licensed under the
 [Apache License 2.0](LICENSE).

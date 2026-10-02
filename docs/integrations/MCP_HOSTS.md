@@ -1,54 +1,57 @@
 # MCP host integration
 
-SYUNE can connect to Codex, Claude Code, Claude Desktop, and generic stdio MCP clients.
-The verified SYUNE-side tuple is:
-
-- command: the absolute path to `syune`
-- arguments: `mcp`, `serve`
-- environment: `SYUNE_STATE_ROOT` set to an initialized absolute state path
-
-An equivalent tuple uses the absolute Python executable with arguments
-`-m`, `syune.gateway.mcp`.
-
-## Before connecting
+SYUNE 1.1 prepares a persistent integration and validates it before you touch host configuration:
 
 ```console
-pip install syune==1.0.3
-syune init --state-root /absolute/path/to/state
+pip install syune==1.1.0
+syune setup
+syune doctor
 ```
 
-Then register one of the generic JSON patterns in the [Lean MCP contract](../MCP_V1.md).
-The server does not initialize state automatically.
+For automation, choose a host explicitly:
 
-## Host guidance
+```console
+syune setup --host codex
+syune setup --host claude-code
+syune setup --host claude-desktop
+syune setup --host generic
+syune setup --host python
+```
 
-| Host | SYUNE support | Host-specific responsibility |
-| --- | --- | --- |
-| Codex | Generic stdio MCP | Register the tuple using current Codex MCP documentation |
-| Claude Code | Generic stdio MCP | Register the tuple using current Claude Code MCP documentation |
-| Claude Desktop | Generic stdio MCP | Register the tuple using current Claude Desktop MCP documentation |
-| Other MCP clients | Generic stdio MCP | Map command, arguments, and environment to the client's server configuration |
+Add `--state-root <absolute-path>` to select a different persistent state. The default is
+`%LOCALAPPDATA%\SYUNE\default` on Windows, `$XDG_STATE_HOME/syune/default` when
+`XDG_STATE_HOME` is set, and `~/.local/state/syune/default` otherwise.
 
-SYUNE does not prescribe or guess third-party UI locations, configuration filenames, or
-client commands. Those interfaces can change independently. Client configuration reload
-or restart behavior is also host-specific.
+For MCP hosts, setup saves and displays a verified tuple with the absolute Python
+executable, arguments `-m syune.gateway.mcp`, and `SYUNE_STATE_ROOT` set to the
+initialized absolute state path. Setup performs a real stdio initialization, calls
+`syune_health`, and verifies all eight Lean tools. It never edits host configuration.
 
-## Verified by SYUNE
+## Host Model Mode
 
-- both canonical entry points;
-- local stdio transport;
-- the eight-tool Lean server;
-- `SYUNE_STATE_ROOT` configuration;
-- protocol initialization and handshake;
-- memory/context operation without separate provider credentials.
+The host continues to perform reasoning. SYUNE supplies governed memory and bounded
+context over MCP. No separate LLM API key is required for the seven memory/context tools.
+`syune_model` needs ModelGateway only when provider execution is explicitly configured.
 
-## Not asserted by SYUNE
+## Register the generated tuple
 
-- native adapters for every agent framework;
-- a particular host's current UI or configuration-file location;
-- automatic host configuration editing;
-- Study/file ingestion through Lean MCP.
+Use the saved JSON artifact and the host's current official mechanism:
 
-The host continues to perform reasoning with its own model access. ModelGateway is
-optional and is used only when an application explicitly delegates model execution to
-SYUNE.
+- Codex: [official MCP documentation](https://developers.openai.com/codex/mcp)
+- Claude Code: [official MCP documentation](https://docs.anthropic.com/en/docs/claude-code/mcp)
+- Claude Desktop: [official Anthropic MCP documentation](https://docs.anthropic.com/en/docs/mcp)
+- Generic clients: map `command`, `args`, and `env` to the stdio server schema.
+
+Host schemas can change independently, so SYUNE does not guess or mutate them.
+
+## Python SDK
+
+`syune setup --host python` initializes persistent state and writes a minimal SDK
+example. It does not create MCP configuration.
+
+## Doctor
+
+`syune doctor` checks package version, effective state, readability, writability,
+compatibility, the executable, a real stdio handshake, health, and the canonical 8/8
+tool surface. `syune doctor --json` supports automation. Missing ModelGateway
+configuration is optional and does not fail doctor.

@@ -25,7 +25,7 @@ def test_cli_init_health_status_config_upgrade_and_exit_codes(tmp_path,capsys):
 
 def test_version_subcommand(capsys):
     assert run(['version','--json'])==SUCCESS
-    assert json.loads(capsys.readouterr().out)['version']=='1.0.3'
+    assert json.loads(capsys.readouterr().out)['version']=='1.1.0'
 
 
 def test_invalid_command_uses_argparse_exit_code_two():

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 - 2026-10-02
+
+- Add interactive and non-interactive setup for five integration targets.
+- Add persistent platform-default state, exact interpreter discovery, generated MCP tuples, and a real stdio handshake.
+- Add doctor with actionable state, MCP, health, 8/8 tool-contract, configuration, and optional ModelGateway diagnostics.
+- Document credential-free Host Model Mode and separate demo state from persistent setup state.
+
+Runtime semantics outside onboarding and integration surfaces are unchanged.
+
+
 ## 1.0.3 - 2026-10-01
 
 - Correct the public MCP documentation to the canonical eight-tool Lean server.

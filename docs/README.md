@@ -66,6 +66,7 @@ default and are outside the stable v1 product contract.
 
 ## Release
 
+- [v1.1.0 release notes](release/v1.1.0.md)
 - [v1.0.3 release notes](release/v1.0.3.md)
 - [v1.0.2 release notes](release/v1.0.2.md)
 - [v1.0.1 release notes](release/v1.0.1.md)

@@ -19,7 +19,7 @@ requires one or more configured absolute allowed roots; see [Study and ingestion
 ## Compatibility and upgrades
 
 Run `syune upgrade check`. Product state schema 1 and the component schemas listed in
-metadata are supported by v1.0.3. No schema transition is required for this release and
+metadata are supported by v1.1.0. No schema transition is required for this release and
 there is no mutating `upgrade` command. Older, unknown, or future schemas stop startup.
 Downgrade is unsupported. A future migration must be explicit, audited, validated, and
 transactional where possible; opening newer software must never trigger one implicitly.

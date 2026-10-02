@@ -29,6 +29,9 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("init", "health", "status", "version"):
         commands.add_parser(name, parents=[common], add_help=True)
+    setup = commands.add_parser("setup", parents=[common], add_help=True)
+    setup.add_argument("--host", choices=("codex", "claude-code", "claude-desktop", "generic", "python"))
+    commands.add_parser("doctor", parents=[common], add_help=True)
     config = commands.add_parser("config", parents=[common], add_help=True)
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("show", parents=[common], add_help=True)
@@ -49,6 +52,44 @@ def _emit(value: dict[str, object], structured: bool) -> None:
             print(f"{key}:")
             for child, state in item.items(): print(f"  {child}: {state}")
         else: print(f"{key}: {item}")
+
+
+def _emit_setup(value: dict[str, object], structured: bool) -> None:
+    if structured: _emit(value, True); return
+    print("SYUNE Setup\n")
+    print(f"Host:                 {value['host']}")
+    print(f"State:                {value['state_root']}")
+    print(f"State initialized:    PASS ({'created' if value['state_created'] else 'reused'})")
+    print("Host Model Mode:      READY")
+    print("Separate LLM API:     NO")
+    print("ModelGateway:         NOT CONFIGURED (optional)")
+    if value["mcp_validation"]:
+        print(f"MCP handshake:        {value['mcp_validation']['handshake']}")
+    else:
+        print("MCP handshake:        NOT APPLICABLE (Python SDK)")
+    if value.get("generated_config"):
+        generated = value["generated_config"]
+        print("\nMCP configuration")
+        print(f"  Command:             {generated['command']}")
+        print(f"  Args:                {json.dumps(generated['args'])}")
+        print(f"  SYUNE_STATE_ROOT:    {generated['env']['SYUNE_STATE_ROOT']}")
+    else:
+        print("\nPython SDK example prepared.")
+    print(f"\nSaved: {value['artifact']}")
+    print(f"Next:  {value['next_action']}")
+
+
+def _emit_doctor(value: dict[str, object], structured: bool) -> None:
+    if structured: _emit(value, True); return
+    print("SYUNE Doctor\n")
+    for item in value["checks"]:
+        print(f"  {item['name']:<28} {item['status']:<8} {item['detail']}")
+        if item.get("fix"): print(f"    Fix: {item['fix']}")
+    print("\nModel")
+    print("  Host Model Mode              READY")
+    print("  Separate LLM API required    NO")
+    print("  ModelGateway                 NOT CONFIGURED (optional)")
+    print(f"\nOverall: {value['overall']}")
 
 
 def _status(config) -> dict[str, object]:
@@ -75,6 +116,14 @@ def run(argv: list[str] | None = None) -> int:
         logging.basicConfig(level=getattr(logging, config.logging.level), format="%(levelname)s %(message)s")
         if args.command == "version":
             _emit({"version": __version__}, structured); return SUCCESS
+        if args.command == "setup":
+            from syune.product.connect import setup
+            value = setup(config, args.host)
+            _emit_setup(value, structured); return SUCCESS
+        if args.command == "doctor":
+            from syune.product.connect import doctor
+            value, ready = doctor(config)
+            _emit_doctor(value, structured); return SUCCESS if ready else UNHEALTHY
         if args.command == "config":
             value = config.public_dict()
             if args.config_command == "validate": value = {"valid": True, "config": value}
@@ -106,6 +155,13 @@ def run(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr); return NOT_INITIALIZED
     except (ValueError, PermissionError) as exc:
+        from syune.product.connect import ConnectFailure
+        if isinstance(exc, ConnectFailure):
+            if getattr(args, "json_output", False):
+                print(json.dumps({"error": exc.code, "message": exc.message, "fix": exc.fix}, sort_keys=True))
+            else:
+                print(f"{exc.code}: {exc.message}\nFix: {exc.fix}", file=sys.stderr)
+            return INVALID_INPUT
         print(str(exc), file=sys.stderr); return INVALID_INPUT
     except Exception as exc:
         if getattr(args, "debug", False): raise

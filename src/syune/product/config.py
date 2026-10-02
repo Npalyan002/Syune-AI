@@ -3,19 +3,26 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import os
-from pathlib import Path
+import sys
+from typing import Mapping
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import tomllib
 
 LOG_LEVELS = frozenset({"ERROR", "WARNING", "INFO", "DEBUG"})
 
 
-def default_state_root() -> Path:
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA")
-        return (Path(base) if base else Path.home() / "AppData" / "Local") / "SYUNE"
-    base = os.environ.get("XDG_STATE_HOME")
-    return (Path(base) if base else Path.home() / ".local" / "state") / "syune"
+def _default_state_root_for(platform: str, environment: Mapping[str, str], home: str) -> str:
+    if platform == "win32":
+        base = environment.get("LOCALAPPDATA")
+        return str((PureWindowsPath(base) if base else PureWindowsPath(home) / "AppData" / "Local") / "SYUNE" / "default")
+    if platform == "darwin" and not environment.get("XDG_STATE_HOME"):
+        return str(PurePosixPath(home) / "Library" / "Application Support" / "SYUNE" / "default")
+    base = environment.get("XDG_STATE_HOME")
+    return str((PurePosixPath(base) if base else PurePosixPath(home) / ".local" / "state") / "syune" / "default")
 
+
+def default_state_root() -> Path:
+    return Path(_default_state_root_for(sys.platform, os.environ, str(Path.home())))
 
 def _absolute(value: str | Path, name: str) -> Path:
     raw = Path(value).expanduser()

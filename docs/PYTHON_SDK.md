@@ -3,7 +3,7 @@
 Install the package and initialize an absolute state root:
 
 ```console
-pip install syune==1.0.3
+pip install syune==1.1.0
 syune init --state-root /absolute/path/to/state
 ```
 

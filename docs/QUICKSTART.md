@@ -1,12 +1,14 @@
 # SYUNE quickstart
 
+> Quickstart is a temporary demo. For persistent integration, run syune setup and syune doctor.
+
 Requirements: Python 3.12 or newer (below 4) and a writable state directory. `uv` is optional.
 
 Create a clean environment and install the published candidate (or a locally built wheel):
 
 ```powershell
 py -3.12 -m venv .quickstart-venv
-.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.3
+.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.1.0
 .\.quickstart-venv\Scripts\syune.exe --version
 ```
 
