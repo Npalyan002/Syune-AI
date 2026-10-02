@@ -6,7 +6,7 @@ Create a clean environment and install the published candidate (or a locally bui
 
 ```powershell
 py -3.12 -m venv .quickstart-venv
-.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.2
+.\.quickstart-venv\Scripts\python.exe -m pip install syune==1.0.3
 .\.quickstart-venv\Scripts\syune.exe --version
 ```
 
@@ -46,3 +46,7 @@ syune mcp serve
 ```
 
 MCP is optional. Startup and health require no network, cloud credentials, or model provider. Attach a configured `ModelGateway` only when generation is needed. Local state remains after package removal. No reset/delete-all command exists.
+
+For host configuration, see [MCP host integration](integrations/MCP_HOSTS.md). For
+single-file TXT, Markdown, and text-PDF ingestion through the SDK, see
+[Study and ingestion](INGESTION.md).

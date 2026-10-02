@@ -7,6 +7,7 @@ model execution, and durable audit. This index is the canonical product document
 
 - [Installation](installation.md)
 - [Quickstart](QUICKSTART.md)
+- [Connect through MCP](integrations/MCP_HOSTS.md)
 - [Examples](../examples/README.md)
 - [Configuration](CONFIGURATION.md)
 - [Local operations](LOCAL_OPERATIONS.md)
@@ -29,6 +30,7 @@ model execution, and durable audit. This index is the canonical product document
 - [Public API v1](PUBLIC_API_V1.md)
 - [Python SDK](PYTHON_SDK.md)
 - [MCP v1](MCP_V1.md)
+- [Study and ingestion](INGESTION.md)
 
 ## Security
 
@@ -64,6 +66,7 @@ default and are outside the stable v1 product contract.
 
 ## Release
 
+- [v1.0.3 release notes](release/v1.0.3.md)
 - [v1.0.2 release notes](release/v1.0.2.md)
 - [v1.0.1 release notes](release/v1.0.1.md)
 - [v1.0.0 release notes](release/v1.0.0.md)

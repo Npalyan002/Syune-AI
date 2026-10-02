@@ -1,24 +1,66 @@
 # Python SDK v1
 
-Install the wheel and initialize a state root with `syune --state-root <absolute-path> init`. Configure allowed source directories with `SYUNE_STUDY_ROOTS` or `config.toml`. SDK v1 is synchronous, local, and in-process.
+Install the package and initialize an absolute state root:
 
-```python
-from syune import CognitiveRequest, CouncilRequest, PlanRequest, RecallRequest, StudyRequest, Syune
-
-with Syune.open(state_root=r"C:\state\syune") as brain:
-    handshake = brain.handshake(["1"])
-    health = brain.health(correlation_id="host-task-42")
-    studied = brain.study(StudyRequest(r"C:\library\notes.md", "host-task-42"))
-    recalled = brain.recall(RecallRequest(cue="release evidence", correlation_id="host-task-42"))
-    cognition = brain.cognize(CognitiveRequest(cue="assess release evidence", correlation_id="host-task-42"))
-    council = brain.council(CouncilRequest("assess release evidence", ("GENERAL", "RESEARCH"), correlation_id="host-task-42"))
-    plan = brain.plan(PlanRequest("review the release evidence", correlation_id="host-task-42"))
+```console
+pip install syune==1.0.3
+syune init --state-root /absolute/path/to/state
 ```
 
-`health`, `status`, `capabilities`, and `handshake` are read-only. `source_status`, `memory_get`, `recall`, `cognize`, and `council` are read-only cognitive operations. `plan` creates only in-memory planning artifacts. `study` is the sole v1 public memory write and is unavailable in `READ_ONLY` and `SHADOW` modes. `NORMAL` and `TEST` advertise it.
+SDK v1 is synchronous, local, and in-process. It requires no LLM or provider credential
+for governed memory, context, lifecycle, audit, or Study.
 
-Use `TypedId.parse("ClaimId:<uuid>")` for memory references. `memory_get` returns a stable public record rather than a repository entity handle. All result objects contain `correlation_id`, `data`, and `public_api_version`. Diagnostics levels are `NONE`, `BASIC`, and `FULL`; FULL may expose scoring and structural reasoning records, never secrets or hidden chain-of-thought.
+## Lean memory and context
 
-Catch `SyuneError` and branch on its stable `code` or `category`. `retryable` is explicit; callers must not infer retry safety from an exception class. Closing is idempotent. Prefer the context manager. A client owns one runtime graph and is limited-concurrency; create separate clients/connections for independently scheduled work and serialize writes to one state root.
+```python
+from pathlib import Path
+from syune import ContextRequest, ProvenanceMode, ReviseRequest, Syune, TypedId
 
-There is no async client in v1. There is no `execute`, `execute_approved`, learning shortcut, repository accessor, DB accessor, reset, or implicit initialization API. Host applications present approvals, but public v1 does not transport them into execution.
+with Syune.open(state_root=Path("/absolute/path/to/state")) as client:
+    stored = client.remember("The deployment window is Friday at 18:00 UTC.")
+    context = client.context(ContextRequest(
+        "deployment window",
+        purpose="release-planning",
+        provenance_mode=ProvenanceMode.FULL,
+    ))
+    memory_id = TypedId.parse(stored.data["memory_id"])
+    revised = client.revise(ReviseRequest(memory_id, "The window is Friday at 19:00 UTC."))
+    history = client.history(stored.data["memory_id"])
+    audit = client.audit()
+```
+
+The stable Lean client covers open/close, remember, recall/context, revise, history,
+lifecycle operations, audit, and optional model execution through an explicitly attached
+ModelGateway. Prefer the context manager; closing is idempotent.
+
+## Stable single-file Study
+
+Configure allowed absolute source directories with `SYUNE_STUDY_ROOTS` or
+`config.toml`, then use `StudyRequest` with an absolute TXT, Markdown, or text-PDF path:
+
+```python
+from pathlib import Path
+from syune import StudyRequest, Syune, TypedId
+
+with Syune.open(state_root=Path("/absolute/path/to/state")) as client:
+    studied = client.study(StudyRequest(str(Path("/approved/library/notes.md"))))
+    status = client.source_status(source_id=TypedId.parse(studied.data["source_id"]))
+```
+
+See [Study and ingestion](INGESTION.md) for formats, provenance, deduplication, revision,
+and unsupported-input details. Study is an SDK operation, not a canonical Lean MCP tool.
+
+## Errors and limits
+
+Catch `SyuneError` and branch on its stable `code` or `category`. `retryable` is
+explicit. A client owns one runtime graph and is limited-concurrency; create separate
+clients for independently scheduled work and serialize writes to one state root.
+
+There is no async client, repository/DB accessor, reset, implicit initialization, folder
+ingestion, or public execution-approval shortcut in v1.
+
+## Experimental compatibility
+
+Research cognition, Council, and Planner methods remain source-compatible for historical
+consumers, but are experimental/deprecated, disabled by default, and outside the stable
+Lean v1 product contract. New applications should not build on them.

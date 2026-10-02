@@ -30,7 +30,7 @@ Stable environment variables:
 | `SYUNE_STUDY_ROOTS` | OS-path-separated approved existing Study roots. |
 | `SYUNE_MAX_RECALL_RESULTS` | MCP recall ceiling, 1 through 32. |
 | `SYUNE_LOG_LEVEL` | `ERROR`, `WARNING`, `INFO`, or `DEBUG`. |
-| `SYUNE_MCP_SHADOW_READ_ONLY` | `1` removes the Study write tool; `0` keeps the configured surface. |
+| `SYUNE_MCP_SHADOW_READ_ONLY` | `1` starts Lean MCP in read-only shadow mode; `0` keeps the normal Lean tool surface. |
 
 `syune config show` prints the effective secret-free model; `syune config validate` fails before runtime open for malformed/unknown keys, relative paths, missing Study roots, invalid enums/types, or widened limits. There are no credential fields. Telemetry is fixed OFF and no environment setting enables it.
 

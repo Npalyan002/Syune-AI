@@ -45,30 +45,36 @@ LLM                             Temporal / Version eligibility
 ## Lean v1 architecture
 
 ```mermaid
-flowchart TD
-  App[Application or agent] --> API[SDK / API / MCP]
-  API --> Lean[SYUNE Lean v1]
-  Lean --> Memory[Governed memory]
-  Lean --> Context[Bounded context]
-  Lean --> Gateway[ModelGateway]
-  Memory --> Retrieval[Hybrid retrieval]
-  Context --> Governance[Authorization · identity · purpose · scope]
-  Context --> Temporal[Temporal/version eligibility]
-  Context --> Provenance[Provenance · lineage · lifecycle]
-  Memory --> Result[Governed result]
-  Retrieval --> Result
-  Governance --> Result
-  Temporal --> Result
-  Provenance --> Result
-  Gateway --> OpenAI[OpenAI Responses]
-  Gateway --> Compatible[OpenAI-compatible / local]
-  Gateway --> Future[Additional adapters]
-  Result --> Audit[Durable audit / observability]
-  Gateway --> Audit
+flowchart LR
+  subgraph Host[Host Model Mode]
+    Agent[Codex / Claude / MCP host] -->|reasoning + MCP| Lean[SYUNE]
+    Lean --> Memory[Governed memory / bounded context]
+  end
+  subgraph GatewayMode[ModelGateway Mode — optional]
+    App[Application] --> Runtime[SYUNE]
+    Runtime --> Gateway[ModelGateway]
+    Gateway --> Adapter[Configured ProviderAdapter]
+    Adapter --> Provider[Provider]
+  end
 ```
 
 See the [Lean v1 architecture](docs/architecture/LEAN_V1_ARCHITECTURE.md) for boundaries,
 storage, detachability modes, and the default-disabled research surfaces.
+
+## Connect SYUNE to your agent stack
+
+SYUNE is model- and agent-framework independent. Connect it to Codex, Claude Code,
+Claude Desktop, or another stdio MCP host through the canonical Lean MCP server, or
+embed it in a custom Python application through the SDK. This is protocol-level
+integration, not a claim that every agent framework has a native SYUNE adapter.
+
+Using SYUNE for MCP memory and context does **not** inherently require a separate LLM
+API credential. The host continues to reason with its own model access; SYUNE supplies
+governed persistent memory and bounded context. ModelGateway is an optional second mode
+for applications that explicitly configure provider execution.
+
+Start with [MCP host integration](docs/integrations/MCP_HOSTS.md), the
+[MCP contract](docs/MCP_V1.md), or the [Python SDK](docs/PYTHON_SDK.md).
 
 ## Why SYUNE
 
@@ -97,7 +103,7 @@ policy, health, evidence, and audit without coupling the memory layer to one pro
 Requires Python 3.12 or newer (below 4).
 
 ```console
-pip install syune==1.0.2
+pip install syune==1.0.3
 python -m syune.quickstart --state-root ./.syune-demo
 ```
 
@@ -121,6 +127,10 @@ with Syune.open(state_root=Path(".syune-demo").resolve()) as memory:
 The [full quickstart](docs/QUICKSTART.md) covers revision, `CURRENT`, historical/`AS_OF`
 queries, lifecycle, durable audit, shutdown, and restart. More focused programs are in
 [`examples/`](examples/README.md).
+
+Stable file Study supports individual TXT, Markdown, and text-based PDF sources through
+the Python SDK. It does not recursively ingest folders or repositories. See the
+[ingestion capability matrix](docs/INGESTION.md).
 
 ## Validated behavior
 
@@ -162,5 +172,5 @@ experimental, retained for compatibility, and disabled by default.
 
 See [known limitations](docs/known_limitations.md) for the complete list.
 
-SYUNE 1.0.2 exposes Public API v1 and is licensed under the
+SYUNE 1.0.3 exposes Public API v1 and is licensed under the
 [Apache License 2.0](LICENSE).

@@ -5,27 +5,29 @@ and reliable model execution. The application or agent retains task ownership an
 what to do with the returned context or model result.
 
 ```mermaid
-flowchart TD
-  App[Application or agent] --> Surface[SDK / API / Lean MCP]
-  Surface --> Runtime[SYUNE Lean v1]
-  Runtime --> Memory[Governed memory]
-  Runtime --> Context[Bounded context assembly]
-  Runtime --> Gateway[ModelGateway]
-  Memory --> Retrieval[Lexical + local vector + associative retrieval]
-  Context --> Auth[Identity / authorization / purpose / scope]
-  Context --> Time[CURRENT / HISTORICAL / AS_OF]
-  Context --> Trace[Provenance / lineage / lifecycle]
-  Retrieval --> Result[Governed result]
-  Auth --> Result
-  Time --> Result
-  Trace --> Result
-  Gateway --> OpenAI[OpenAI Responses adapter]
-  Gateway --> Compatible[OpenAI-compatible / local adapter]
-  Gateway --> Adapters[Additional provider adapters]
-  Result --> Audit[Durable audit]
-  Gateway --> Evidence[Provider evidence / metrics / health]
-  Evidence --> Audit
+flowchart LR
+  subgraph HostMode[Host Model Mode]
+    Host[Codex / Claude / MCP host] -->|reasoning + stdio MCP| HostRuntime[SYUNE]
+    HostRuntime --> HostMemory[Governed memory / bounded context]
+  end
+  subgraph ModelMode[ModelGateway Mode — optional]
+    App[Application] --> Runtime[SYUNE]
+    Runtime --> Gateway[ModelGateway]
+    Gateway --> Adapter[Configured ProviderAdapter]
+    Adapter --> Provider[Provider]
+  end
 ```
+
+## Two operating modes
+
+In **Host Model Mode**, Codex, Claude Code, Claude Desktop, or another MCP host performs
+reasoning using its own model access. The host calls SYUNE's Lean MCP tools for governed
+memory and bounded context. SYUNE requires no separate LLM API credential and
+ModelGateway is not part of this path.
+
+In **ModelGateway Mode**, an application explicitly constructs and attaches a
+ModelGateway, provider adapter, model route, policy, and any required credential. This
+mode is optional relative to normal MCP memory/context use.
 
 ## Memory and retrieval
 
@@ -50,6 +52,12 @@ ModelGateway is independent of memory storage. It provides provider routing, cap
 checks, structured-output validation, retry, opt-in repair, explicit fallback, budgets,
 circuit breaking, health, durable evidence, metrics, and idempotent logical calls.
 Credentials remain provider-specific and are never embedded in the repository.
+
+The provider-neutral gateway contract is stable. Concrete OpenAI Responses and
+OpenAI-compatible adapters exist as internal deployment components, not turnkey stable
+public configuration surfaces. Local-compatible behavior depends on the endpoint
+implementing the expected Responses API shape. Anthropic and Gemini transports are not
+implemented. Other providers require an implementation of `ProviderAdapter`.
 
 ## Audit and observability
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.3 - 2026-10-01
+
+- Correct the public MCP documentation to the canonical eight-tool Lean server.
+- Document Codex, Claude Code, Claude Desktop, and generic stdio MCP integration without
+  guessing host-specific configuration interfaces.
+- Distinguish credential-free Host Model Mode from optional ModelGateway Mode.
+- Correct concrete provider-adapter claims and document unsupported transports.
+- Document stable TXT, Markdown, and text-PDF Study plus unsupported and experimental
+  ingestion formats.
+- Refocus the stable SDK and operations guides on the Lean v1 product boundary.
+
+This is a documentation and onboarding alignment patch. Runtime semantics are unchanged.
+
 ## 1.0.2 - 2026-10-01
 
 - Make `python -m syune.quickstart` initialize and run successfully from a fresh

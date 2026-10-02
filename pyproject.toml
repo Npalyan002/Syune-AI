@@ -1,6 +1,6 @@
 [project]
 name = "syune"
-version = "1.0.2"
+version = "1.0.3"
 description = "A governed memory, context and model-execution runtime for AI systems"
 keywords = [
     "ai",
@@ -37,7 +37,7 @@ dev = ["pytest>=8,<10"]
 syune = "syune.cli.app:main"
 
 [build-system]
-requires = ["hatchling>=1.26"]
+requires = ["hatchling>=1.26,<1.32"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -64,6 +64,8 @@ include = [
     "/docs/PUBLIC_API_V1.md",
     "/docs/PYTHON_SDK.md",
     "/docs/MCP_V1.md",
+    "/docs/INGESTION.md",
+    "/docs/integrations",
     "/docs/HOST_INTEGRATION_PROTOCOL_V1.md",
     "/docs/COMPATIBILITY_MATRIX.md",
     "/docs/product_refactor",

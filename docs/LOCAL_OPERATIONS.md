@@ -8,15 +8,29 @@
 
 ## MCP and shutdown
 
-Configure one or more absolute Study roots and run `syune mcp serve`. It uses the same state root, memory and Study databases as the CLI. Stop the stdio process normally; its context manager closes databases. MCP stays L1 advisory and cannot invoke the L3 execution runtime.
+Set `SYUNE_STATE_ROOT` to an initialized absolute state path and run `syune mcp serve`.
+The canonical Lean MCP server exposes memory, context, governance, audit, lifecycle, and
+optional explicitly configured model execution. It does not expose Study. Stop the stdio
+process normally; its context manager closes databases.
+
+Single-file TXT, Markdown, and text-PDF Study is available through the Python SDK. Study
+requires one or more configured absolute allowed roots; see [Study and ingestion](INGESTION.md).
 
 ## Compatibility and upgrades
 
-Run `syune upgrade check`. Product state schema 1 and component schemas listed in metadata are supported by 0.1.0. No schema transition is needed, so Phase 15 intentionally contains no migration engine or `upgrade` mutation command. Older/unknown/future schemas stop. Downgrade is unsupported. A future known migration must be explicit, audited, pre/post-validated and transactional where possible; opening newer software must never trigger one automatically.
+Run `syune upgrade check`. Product state schema 1 and the component schemas listed in
+metadata are supported by v1.0.3. No schema transition is required for this release and
+there is no mutating `upgrade` command. Older, unknown, or future schemas stop startup.
+Downgrade is unsupported. A future migration must be explicit, audited, validated, and
+transactional where possible; opening newer software must never trigger one implicitly.
 
 ## Backup and uninstall
 
-With SYUNE processes stopped, back up the entire state root. Critical paths are `memory/`, `study/`, `learning/`, `execution/`, `executive/`, `artifacts/`, `metadata/`, and `config.toml` when present. `cache/` and `logs/` may be excluded. Phase 17 will harden backup/restore. Package uninstall has no hook and leaves state untouched.
+With SYUNE processes stopped, back up the entire state root. Critical paths are
+`memory/`, `study/`, `learning/`, `execution/`, `executive/`, `artifacts/`, `metadata/`,
+and `config.toml` when present. Compatibility directories may exist even though their
+research services are disabled by default. `cache/` and `logs/` may be excluded. Package
+uninstall has no hook and leaves state untouched.
 
 ## Troubleshooting
 
@@ -24,5 +38,5 @@ With SYUNE processes stopped, back up the entire state root. Critical paths are 
 - “absolute path”: correct state, config, or Study roots; current working directory is never an implicit product root.
 - “unsupported product/component schema”: stop and preserve the state; do not edit metadata or databases manually.
 - “missing component databases”: restore the complete state backup. Init will not silently recreate an initialized instance's missing data.
-- MCP requires Study roots: set `SYUNE_STUDY_ROOTS` to approved existing directories.
+- SDK Study requires approved existing roots in `SYUNE_STUDY_ROOTS` or `config.toml`.
 - Use `--debug` only for local diagnosis; normal failures omit tracebacks and private source content.

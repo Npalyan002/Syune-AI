@@ -8,12 +8,12 @@ def main():
     parser=argparse.ArgumentParser(); parser.add_argument("--output",type=Path); args=parser.parse_args()
     from syune import (ContextRequest, ProvenanceMode, ReviseRequest, Syune, TypedId,
         __version__, context_only, full_lean, memory_context, memory_only, model_gateway_only)
-    assert __version__=="1.0.2"
+    assert __version__=="1.0.3"
     base=Path(tempfile.mkdtemp(prefix="syune-rc1-")); state=base/"state"
     subprocess.run([sys.executable,"-m","syune.cli.app","init","--state-root",str(state)],check=True,
                    stdout=subprocess.DEVNULL)
     with Syune.open(state_root=state) as client:
-        assert client.status().data["package_version"]=="1.0.2"
+        assert client.status().data["package_version"]=="1.0.3"
         first=client.remember("installed wheel governed record"); old=first.data["memory_id"]
         context=client.context(ContextRequest("governed record",provenance_mode=ProvenanceMode.FULL))
         assert context.data["items"][0]["audit_sequence"] and "provenance" in context.data["rendered"]
@@ -31,7 +31,7 @@ def main():
                 result=await mcp.call_tool("syune_health")
                 assert not result.is_error and result.structured_content["product"]=="SYUNE"
                 assert result.structured_content["runtime"]=="LEAN_V1"
-                assert result.structured_content["version"]=="1.0.2"
+                assert result.structured_content["version"]=="1.0.3"
         asyncio.run(mcp_check())
         restored.close()  # repeated shutdown is safe
     modes={}

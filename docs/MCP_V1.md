@@ -1,24 +1,77 @@
-# MCP v1
+# Lean MCP v1
 
-MCP v1 is a local process-bound stdio surface started with `syune mcp serve` or `python -m syune.gateway.mcp`. Package version, public API version, and MCP contract version are separate fields in health/status. Normal errors are bounded stable codes and do not contain tracebacks.
+The canonical Lean MCP server is a local stdio process. Start it with either:
 
-| Tool | Class | Meaning |
-| --- | --- | --- |
-| `syune_health` | READ_ONLY | Component health and version metadata |
-| `syune_status` | READ_ONLY | Runtime mode, autonomy, telemetry, versions |
-| `syune_capabilities` | READ_ONLY | Mode-aware operation discovery |
-| `syune_source_status` | READ_ONLY | Source/revision/materialization status |
-| `syune_memory_get` | READ_ONLY | Public record by canonical typed ID |
-| `syune_recall` | READ_ONLY | Bounded associative recall |
-| `syune_cognize` | READ_ONLY | Bounded profile cognition |
-| `syune_council` | READ_ONLY | Explicit multi-profile advisory Council |
-| `syune_plan` | PLANNING_ONLY | Proposal-only L2 plan |
-| `syune_study_source` | MEMORY_WRITE | Study an allowed local source |
+```console
+syune mcp serve
+```
 
-NORMAL exposes all ten tools. SHADOW/read-only omits `syune_study_source`; capability discovery also marks Study unavailable. No MCP execution tool exists. A plan, action proposal, or approval envelope cannot cause execution through this transport.
+```console
+python -m syune.gateway.mcp
+```
 
-Inputs obey SDK limits, typed ID rules, provenance semantics, configured-root path confinement, and correlation handling. SDK/MCP transport shapes differ where MCP uses JSON arguments, but health, recall, cognition, Council, and planning retain the same meanings.
+Both commands expose the same eight-tool Lean surface:
 
-Generic host configuration is in `examples/host_integration/mcp-config.json`; it uses environment placeholders and contains no repository or personal path. The server opens product state through the Phase 15 configuration layer and never gives the host a database handle.
+| Tool | Meaning |
+| --- | --- |
+| `syune_health` | Health, version, mode, and capability information |
+| `syune_remember` | Store governed plain-text memory |
+| `syune_context` | Assemble bounded, governed context |
+| `syune_revise` | Create a revision of existing memory |
+| `syune_forget` | Apply the governed forget lifecycle operation |
+| `syune_history` | Read revision history |
+| `syune_audit` | Read bounded audit events |
+| `syune_model` | Execute through an explicitly attached ModelGateway |
 
-Approval boundary: the host owns approval presentation, SYUNE owns verification, and plaintext confirmation is insufficient. Since execution is not public in v1, approval transport is documented by the host protocol for compatibility but no tool accepts an approval or bypass flag.
+The server does not expose Study, cognition, Council, Planner, or Executive operations.
+Older compatibility servers may still exist in source for compatibility testing, but
+they are experimental/deprecated and are not the canonical Lean MCP v1 interface.
+
+## Initialize state
+
+The MCP server does not implicitly initialize state. Initialize an absolute state root:
+
+```console
+syune init --state-root /absolute/path/to/state
+```
+
+The stable SDK/MCP boundary requires an absolute state-root path.
+
+## Generic host configuration
+
+Register this verified MCP tuple in a host that accepts stdio servers:
+
+```json
+{
+  "command": "/absolute/path/to/syune",
+  "args": ["mcp", "serve"],
+  "env": {
+    "SYUNE_STATE_ROOT": "/absolute/path/to/initialized-state"
+  }
+}
+```
+
+Or invoke the installed module with the environment's Python executable:
+
+```json
+{
+  "command": "/absolute/path/to/python",
+  "args": ["-m", "syune.gateway.mcp"],
+  "env": {
+    "SYUNE_STATE_ROOT": "/absolute/path/to/initialized-state"
+  }
+}
+```
+
+SYUNE verifies the executable entry points, arguments, environment contract, stdio
+transport, and MCP handshake. Where this tuple is registered and how configuration is
+reloaded are host-specific; consult the host's current MCP documentation.
+
+## Model access
+
+Memory and context use in an MCP host requires no separate LLM API credential from
+SYUNE. The host performs reasoning using its own model access. Only `syune_model`
+requires an explicitly attached ModelGateway and configured provider.
+
+See [MCP host integration](integrations/MCP_HOSTS.md) for Codex, Claude Code, Claude
+Desktop, and generic-host guidance.
