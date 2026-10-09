@@ -60,7 +60,7 @@ jobs:
             -subj '/CN=localhost' \
             -keyout "$fixture_dir/privkey.pem" \
             -out "$fixture_dir/fullchain.pem" >/dev/null 2>&1
-          sudo chown 0:0 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
+          sudo chown 101:101 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
           sudo chmod 0400 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
           {
             echo "SYUNE_AML_BEARER_TOKEN_FILE=$fixture_dir/bearer-token-container"
@@ -176,6 +176,7 @@ jobs:
           proxy_id="$(docker compose ps -q proxy)"
           test -n "$app_id" && test -n "$proxy_id"
           test "$(docker inspect --format '{{.Config.User}}' "$app_id")" = '10001:10001'
+          test "$(docker inspect --format '{{.Config.User}}' "$proxy_id")" = '101:101'
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$app_id")" = 'true'
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$proxy_id")" = 'true'
           test "$(docker inspect --format '{{.HostConfig.Memory}}' "$app_id")" = '2147483648'
@@ -200,8 +201,9 @@ jobs:
           '
           docker compose exec -T proxy nginx -t
           docker compose exec -T proxy sh -ec '
-            test "$(stat -c "%u:%g:%a" /run/tls/fullchain.pem)" = "0:0:400"
-            test "$(stat -c "%u:%g:%a" /run/tls/privkey.pem)" = "0:0:400"
+            test "$(id -u):$(id -g)" = "101:101"
+            test "$(stat -c "%u:%g:%a" /run/tls/fullchain.pem)" = "101:101:400"
+            test "$(stat -c "%u:%g:%a" /run/tls/privkey.pem)" = "101:101:400"
           '
 
       - name: Exercise authenticated Add Search and 100-result recall

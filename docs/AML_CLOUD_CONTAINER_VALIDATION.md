@@ -60,9 +60,11 @@ The bearer token is randomly generated inside the runner and registered with
 GitHub's masking command. A mode-`0600` runner-owned copy is used by the client
 probe; a separate mode-`0400`, UID/GID-`10001` copy is mounted by Compose so the
 non-root application can read it without broadening file permissions. The
-one-day self-signed certificate and key are root-owned mode `0400`, matching the
-capability-stripped Nginx master process. They are also runner-local. Neither
-value is a GitHub secret or production credential.
+one-day self-signed certificate and key are mode `0400` and owned by the
+unprivileged Nginx UID/GID `101:101`. The proxy's writable tmpfs mounts use the
+same identity, so it needs neither `CHOWN` nor `NET_BIND_SERVICE`; all Linux
+capabilities remain dropped. The files are runner-local. Neither value is a
+GitHub secret or production credential.
 
 Test messages contain only a fixed synthetic marker. Application and proxy logs
 remain metadata-only. The workflow scans logs and image material, then deletes

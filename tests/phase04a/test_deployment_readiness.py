@@ -141,6 +141,8 @@ def test_container_and_vm_are_single_process_hardened_and_frozen():
     assert "read_only: true" in compose and "no-new-privileges:true" in compose
     assert "SYUNE_AML_BEARER_TOKEN_FILE" in compose and "SYUNE_AML_BEARER_TOKEN:" not in compose
     assert "nginx:1.28.0-alpine@sha256:" in compose
+    assert 'user: "101:101"' in compose
+    assert "NET_BIND_SERVICE" not in compose
     assert "--workers 1" in unit and "ProtectSystem=strict" in unit
     assert "LoadCredential=" in unit and "TimeoutStopSec=1860" in unit
 
