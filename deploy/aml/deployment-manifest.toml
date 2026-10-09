@@ -39,6 +39,6 @@ immutable_digest_status = "OCI indexes fetched and SHA-256 recomputed; Docker bu
 [cloud_validation]
 workflow = ".github/workflows/aml-container-validation.yml"
 runner = "ubuntu-24.04"
-trigger = "workflow_dispatch only"
+trigger = "workflow_dispatch through default-registered cross-platform acceptance proxy"
 permissions = "contents: read"
 status = "prepared but not executed"

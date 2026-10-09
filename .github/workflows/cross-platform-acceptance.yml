@@ -18,8 +18,8 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -29,3 +29,10 @@ jobs:
           python -m build
       - name: Accept installed wheel
         run: python scripts/cross_platform_acceptance.py --wheel-dir dist
+
+  aml-container-validation:
+    name: AML cloud container validation
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/aml-container-validation.yml

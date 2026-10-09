@@ -14,6 +14,7 @@ def test_workflow_is_manual_least_privilege_and_immutable():
     text = WORKFLOW.read_text(encoding="utf-8")
     trigger = text.split("permissions:", 1)[0]
     assert "workflow_dispatch:" in trigger
+    assert "workflow_call:" in trigger
     assert "pull_request:" not in trigger and "push:" not in trigger
     assert re.search(r"permissions:\s*\n\s+contents: read", text)
     actions = re.findall(r"uses:\s*([^\s]+)", text)
@@ -24,6 +25,19 @@ def test_workflow_is_manual_least_privilege_and_immutable():
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in actions)
     assert "secrets." not in text
     assert "upload-artifact" not in text and "id-token: write" not in text
+
+
+def test_default_registered_proxy_can_only_call_container_job_manually():
+    text = (ROOT / ".github" / "workflows" / "cross-platform-acceptance.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "if: ${{ github.event_name == 'workflow_dispatch' }}" in text
+    assert "uses: ./.github/workflows/aml-container-validation.yml" in text
+    actions = re.findall(r"uses:\s*(actions/[^\s]+)", text)
+    assert actions == [
+        "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+        "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+    ]
 
 
 def test_workflow_covers_required_container_gates_without_printing_values():

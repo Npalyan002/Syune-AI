@@ -18,10 +18,13 @@ may be reported as passed until a completed run is reviewed.
 4. Keep workflow permissions at `contents: read`. No environments, repository
    secrets, OIDC tokens, package writes, artifacts, caches, or privileged
    third-party actions are required.
-5. Manually dispatch **AML container release-candidate validation** for the
-   exact candidate ref. Record the source commit and workflow run URL in the
-   release evidence. A dispatch is intentionally not configured for pushes or
-   pull requests.
+5. Manually dispatch **SYUNE v1.1 cross-platform acceptance** for the exact
+   candidate ref. GitHub requires a dispatch target to exist on the default
+   branch, so the candidate version of that already-registered workflow invokes
+   the reusable **AML container release-candidate validation** workflow. Its AML
+   job is explicitly guarded to `workflow_dispatch`; push and pull-request runs
+   cannot invoke the container validation. Record the source commit and workflow
+   run URL in the release evidence.
 
 The only actions are pinned to immutable commits already reviewed in the
 repository's release workflow:
