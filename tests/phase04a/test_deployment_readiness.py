@@ -167,7 +167,8 @@ def test_release_candidate_source_manifest_is_complete_and_current():
             continue
         digest, relative = line.split("  ", 1)
         entries[relative] = digest
-        assert hashlib.sha256((PROJECT / relative).read_bytes()).hexdigest() == digest
+        canonical = (PROJECT / relative).read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(canonical).hexdigest() == digest
     tracked = subprocess.run(
         ["git", "diff", "--name-only", BASELINE], cwd=PROJECT, check=True,
         capture_output=True, text=True,

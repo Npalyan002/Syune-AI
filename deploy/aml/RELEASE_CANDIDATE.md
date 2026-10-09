@@ -25,6 +25,8 @@ historical `v1.1.0` artifact.
   environment-specific mount, upstream, log, and PID paths substituted.
 - `source-change-manifest.sha256` records every tracked modification and
   non-ignored untracked source/deployment/test file relative to the baseline.
+  Text hashes use canonical LF line endings so Windows and Linux checkouts
+  reproduce the same values.
 
 ## Promotion gate
 
