@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from deploy.aml.cloud_container_probe import PRIVATE_MARKER, add_payload
+from deploy.aml.cloud_container_probe import (
+    PRIVATE_MARKER,
+    add_payload,
+    native_100_search_payload,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,6 +52,8 @@ def test_workflow_covers_required_container_gates_without_printing_values():
         "docker compose up --detach --no-build",
         "docker compose exec -T proxy nginx -t",
         "--phase initial",
+        "--phase seed-native-100",
+        "--phase native-100",
         "--phase after-restart",
         "--phase persistence",
         "--phase limits",
@@ -78,3 +84,4 @@ def test_synthetic_probe_preserves_order_and_fills_native_top_100_pool():
         str(index) for index in range(20)
     ]
     assert all(PRIVATE_MARKER in message["content"] for message in messages)
+    assert native_100_search_payload()["top_k"] == 100

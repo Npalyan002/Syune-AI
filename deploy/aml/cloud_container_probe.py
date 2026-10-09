@@ -66,6 +66,14 @@ def search_payload() -> dict:
     }
 
 
+def native_100_search_payload() -> dict:
+    return {
+        "query": "cloud century candidate marker",
+        "user_id": "cloud-user-a",
+        "top_k": 100,
+    }
+
+
 def wait_for_health(base: str) -> None:
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
@@ -95,9 +103,61 @@ def initial(base: str, token: str) -> None:
         }
     assert request(base, "/add", token=token, payload=add_payload(0))[0] == 200
     status, _, response = request(base, "/search", token=token, payload=search_payload())
-    assert status == 200 and len(response["data"]) == 100
+    assert status == 200 and 0 < len(response["data"]) < 100
     assert all(set(item) == {"id", "content", "score", "created_at"}
                for item in response["data"])
+
+
+def seed_native_100(state_root: Path) -> None:
+    """Create a synthetic native graph that can legitimately expand to 100 hits."""
+    from datetime import datetime, timezone
+    from uuid import UUID
+
+    from syune.core import AssociationId, ConceptId, Confidence, ProvenanceId, SourceId
+    from syune.memory import Association, Concept, Provenance, SecurityEnvelope, Source
+    from syune.product.config import load_config
+    from syune.product.runtime import SyuneRuntime
+
+    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    security = SecurityEnvelope(owner="user:cloud-user-a")
+    source_id = SourceId(UUID(int=500_000))
+    provenance = Provenance(ProvenanceId(UUID(int=500_001)), source_id, at)
+    with SyuneRuntime.open(load_config(cli_state_root=state_root)) as runtime:
+        runtime.memory.put(Source(source_id, "test", "cloud-native-100", at,
+                                  security=security))
+        concepts = []
+        for index in range(100):
+            concept = Concept(
+                ConceptId(UUID(int=501_000 + index)),
+                "cloud century candidate marker",
+                provenance,
+                Confidence(.5),
+                at,
+                security=security,
+            )
+            runtime.memory.put(concept)
+            concepts.append(concept)
+        for index in range(32, 100):
+            runtime.memory.add_association(Association(
+                AssociationId(UUID(int=502_000 + index)),
+                concepts[(index - 32) % 32].id,
+                concepts[index].id,
+                "associated_with",
+                provenance,
+                Confidence(.8),
+                at,
+                1.0,
+            ))
+        runtime.index.sync()
+
+
+def native_100(base: str, token: str) -> None:
+    status, _, response = request(
+        base, "/search", token=token, payload=native_100_search_payload()
+    )
+    assert status == 200 and len(response["data"]) == 100
+    scores = [item["score"] for item in response["data"]]
+    assert scores == sorted(scores, reverse=True)
 
 
 def after_restart(base: str, token: str) -> None:
@@ -108,7 +168,8 @@ def after_restart(base: str, token: str) -> None:
     status, _, response = request(base, "/add", token=token, payload=changed)
     assert status == 409 and response == {"detail": {"reason": "request_id conflict"}}
     status, _, response = request(base, "/search", token=token, payload=search_payload())
-    assert status == 200 and len(response["data"]) == 100
+    assert status == 200 and 0 < len(response["data"]) < 100
+    native_100(base, token)
 
     def concurrent(index: int) -> int:
         if index % 2:
@@ -154,20 +215,31 @@ def persistence(base: str, token: str) -> None:
     wait_for_health(base)
     assert request(base, "/add", token=token, payload=add_payload(0))[0] == 200
     status, _, response = request(base, "/search", token=token, payload=search_payload())
-    assert status == 200 and len(response["data"]) == 100
+    assert status == 200 and 0 < len(response["data"]) < 100
+    native_100(base, token)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--phase", required=True,
-        choices=("initial", "after-restart", "persistence", "limits"),
+        choices=("initial", "seed-native-100", "native-100", "after-restart",
+                 "persistence", "limits"),
     )
     parser.add_argument("--base", default="https://127.0.0.1")
-    parser.add_argument("--token-file", type=Path, required=True)
+    parser.add_argument("--token-file", type=Path)
+    parser.add_argument("--state-root", type=Path)
     args = parser.parse_args()
+    if args.phase == "seed-native-100":
+        if args.state_root is None:
+            parser.error("--state-root is required for seed-native-100")
+        seed_native_100(args.state_root)
+        print(json.dumps({"phase": args.phase, "status": "passed"}))
+        return
+    if args.token_file is None:
+        parser.error("--token-file is required for HTTP probe phases")
     token = args.token_file.read_text(encoding="utf-8").strip()
-    {"initial": initial, "after-restart": after_restart,
+    {"initial": initial, "native-100": native_100, "after-restart": after_restart,
      "persistence": persistence, "limits": limits}[
         args.phase](args.base, token)
     print(json.dumps({"phase": args.phase, "status": "passed"}))
