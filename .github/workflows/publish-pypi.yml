@@ -1,12 +1,15 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing stable release tag to publish (for example, v2.0.0)"
+        required: true
+        type: string
 
 jobs:
   build:
-    if: ${{ !github.event.release.draft && !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -14,7 +17,7 @@ jobs:
       - name: Validate stable release tag
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Expected a stable release tag in vMAJOR.MINOR.PATCH form." >&2
@@ -24,7 +27,7 @@ jobs:
       - name: Check out the exact release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ inputs.tag }}
           persist-credentials: false
 
       - name: Set up Python
@@ -35,7 +38,7 @@ jobs:
       - name: Verify tag and package versions agree
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           python - <<'PY'
           import os

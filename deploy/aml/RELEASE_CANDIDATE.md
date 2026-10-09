@@ -44,3 +44,9 @@ and the full regression suite. A successful candidate run is necessary but does
 not authorize a tag, release, package publication, AML submission, or public
 deployment. Those actions require separate approval and production capacity,
 secret, TLS, monitoring, and retention records.
+
+PyPI publication is deliberately independent from GitHub Release publication.
+`.github/workflows/publish-pypi.yml` has only a manual `workflow_dispatch`
+trigger and requires an explicit existing stable tag input. Its protected `pypi`
+environment and OIDC Trusted Publishing permission remain intact. Dispatching
+that workflow requires separate authorization and is outside this release phase.
