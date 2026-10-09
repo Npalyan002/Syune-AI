@@ -213,11 +213,9 @@ jobs:
           python deploy/aml/cloud_container_probe.py \
             --phase initial --base https://127.0.0.1 \
             --token-file "$AML_CI_CLIENT_TOKEN_FILE"
-          app_id="$(docker compose ps --quiet app)"
-          docker cp deploy/aml/cloud_container_probe.py \
-            "$app_id:/tmp/cloud_container_probe.py"
-          docker compose exec -T app python /tmp/cloud_container_probe.py \
-            --phase seed-native-100 --state-root /var/lib/syune-aml
+          docker compose exec -T app python - \
+            --phase seed-native-100 --state-root /var/lib/syune-aml \
+            < deploy/aml/cloud_container_probe.py
           python deploy/aml/cloud_container_probe.py \
             --phase native-100 --base https://127.0.0.1 \
             --token-file "$AML_CI_CLIENT_TOKEN_FILE"
