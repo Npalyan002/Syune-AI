@@ -39,14 +39,14 @@ async def handshake(command: str, args: list[str], env: dict[str, str], cwd: Pat
         health = await client.call_tool("syune_health")
         assert not health.is_error
         assert health.structured_content
-        assert health.structured_content["version"] == "1.1.0"
+        assert health.structured_content["version"] == "2.0.0"
         assert health.structured_content["transport"] == "stdio"
 
 
 def installed_acceptance() -> None:
     import syune
 
-    assert syune.__version__ == "1.1.0"
+    assert syune.__version__ == "2.0.0"
     work = Path(tempfile.mkdtemp(prefix="syune acceptance "))
     try:
         env = dict(os.environ)
@@ -154,7 +154,7 @@ def installed_acceptance() -> None:
 
 
 def bootstrap(wheel_dir: Path) -> None:
-    wheels = list(wheel_dir.resolve().glob("syune-1.1.0-py3-none-any.whl"))
+    wheels = list(wheel_dir.resolve().glob("syune-2.0.0-py3-none-any.whl"))
     assert len(wheels) == 1, wheels
     root = Path(tempfile.mkdtemp(prefix="syune wheel acceptance "))
     try:
