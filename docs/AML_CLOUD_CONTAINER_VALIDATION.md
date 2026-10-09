@@ -60,8 +60,9 @@ The bearer token is randomly generated inside the runner and registered with
 GitHub's masking command. A mode-`0600` runner-owned copy is used by the client
 probe; a separate mode-`0400`, UID/GID-`10001` copy is mounted by Compose so the
 non-root application can read it without broadening file permissions. The
-one-day self-signed certificate is also runner-local. Neither value is a GitHub
-secret or production credential.
+one-day self-signed certificate and key are root-owned mode `0400`, matching the
+capability-stripped Nginx master process. They are also runner-local. Neither
+value is a GitHub secret or production credential.
 
 Test messages contain only a fixed synthetic marker. Application and proxy logs
 remain metadata-only. The workflow scans logs and image material, then deletes

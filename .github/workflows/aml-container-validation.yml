@@ -60,7 +60,8 @@ jobs:
             -subj '/CN=localhost' \
             -keyout "$fixture_dir/privkey.pem" \
             -out "$fixture_dir/fullchain.pem" >/dev/null 2>&1
-          chmod 0600 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
+          sudo chown 0:0 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
+          sudo chmod 0400 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
           {
             echo "SYUNE_AML_BEARER_TOKEN_FILE=$fixture_dir/bearer-token-container"
             echo "AML_CI_CLIENT_TOKEN_FILE=$fixture_dir/bearer-token-client"
@@ -198,6 +199,10 @@ jobs:
             test -f /var/lib/syune-aml/memory/memory.sqlite3
           '
           docker compose exec -T proxy nginx -t
+          docker compose exec -T proxy sh -ec '
+            test "$(stat -c "%u:%g:%a" /run/tls/fullchain.pem)" = "0:0:400"
+            test "$(stat -c "%u:%g:%a" /run/tls/privkey.pem)" = "0:0:400"
+          '
 
       - name: Exercise authenticated Add Search and 100-result recall
         shell: bash
