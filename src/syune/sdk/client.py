@@ -7,7 +7,7 @@ from typing import Callable, TypeVar
 from syune.api.capabilities import capability_summary
 from syune.api.errors import ErrorCategory, SyuneError
 from syune.api.model import (
-    AuditResult, CapabilitySummary, ContextRequest, ContextResult, HistoryResult, ModelResult, RememberRequest, RememberResult, ReviseRequest, RevisionResult, CognitiveRequest as PublicCognitiveRequest, CognitiveResult as PublicCognitiveResult,
+    AddMessage, AuditResult, BatchAddRequest, BatchAddResult, CapabilitySummary, ContextRequest, ContextResult, HistoryResult, ModelResult, RememberRequest, RememberResult, ReviseRequest, RevisionResult, CognitiveRequest as PublicCognitiveRequest, CognitiveResult as PublicCognitiveResult,
     CouncilRequest as PublicCouncilRequest, CouncilResult as PublicCouncilResult, DiagnosticsLevel,
     HealthResult, MemoryResult, PlanRequest, PlanResult, RecallRequest as PublicRecallRequest,
     RecallResult as PublicRecallResult, RuntimeMode, SourceStatusResult, StatusResult,
@@ -38,6 +38,21 @@ def _cid(value: str | None) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 128:
         raise SyuneError("INVALID_REQUEST", "invalid correlation_id", ErrorCategory.INVALID_REQUEST)
     return value
+
+
+def _observed_at(value: str | None, default):
+    from datetime import datetime, timezone
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("observed_at must be a timezone-aware ISO 8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("observed_at must be a timezone-aware ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("observed_at must include a timezone offset")
+    return parsed.astimezone(timezone.utc)
 
 
 def _internal_id(value: TypedId, expected=None):
@@ -168,18 +183,115 @@ class Syune:
             from syune.core import Confidence, ObservationId, ProvenanceId, SourceId, utc_now
             from syune.memory import Observation, Provenance, SecurityEnvelope, Source
             now, source_id = utc_now(), SourceId.new()
+            observed_at = _observed_at(request.observed_at, now)
             security = SecurityEnvelope(owner=request.owner, allowed_principals=request.allowed_principals) \
                 if request.owner or request.allowed_principals else None
             source = Source(source_id, "direct", request.source_name, now, security=security)
             observation = Observation(ObservationId.new(), request.text, "text",
                 Provenance(ProvenanceId.new(), source_id, now, process_id="syune.remember",
-                           pipeline_version="lean-v1"), now, now, Confidence(1.0), security=security)
+                           pipeline_version="lean-v1"), observed_at, now, Confidence(1.0), security=security)
             self.__runtime.memory.put_many((source, observation)); self.__runtime.index.sync()
             self.__runtime.audit.record(operation_id=cid, correlation_id=cid, operation_type="remember",
                 outcome="SUCCESS", resource_ids=(f"SourceId:{source.id}", f"ObservationId:{observation.id}"))
             return RememberResult(cid, {"source_id": f"SourceId:{source.id}",
                 "memory_id": f"ObservationId:{observation.id}", "stored_as": "observation",
-                "truth_claim": False})
+                "truth_claim": False,
+                "observed_at": observation.observed_at.isoformat().replace("+00:00", "Z"),
+                "created_at": observation.created_at.isoformat().replace("+00:00", "Z")})
+        return self._call(request.correlation_id, operation)
+
+    def add_batch(self, request: BatchAddRequest, *, global_request_id: bool = False) -> BatchAddResult:
+        """Atomically add an ordered, idempotent user/session message batch."""
+        if self._mode not in (RuntimeMode.NORMAL, RuntimeMode.TEST):
+            raise SyuneError("BLOCKED", "batch add is unavailable in this runtime mode",
+                             ErrorCategory.BLOCKED, blocked=True)
+        def operation(cid):
+            import hashlib
+            import json
+            from uuid import NAMESPACE_URL, uuid5
+            from syune.core import Confidence, ObservationId, ProvenanceId, SourceId, utc_now
+            from syune.memory import (
+                IdempotencyConflictError, Observation, Provenance, SecurityEnvelope, Source,
+            )
+            if not isinstance(request, BatchAddRequest):
+                raise ValueError("BatchAddRequest required")
+            for name in ("request_id", "user_id", "session_id"):
+                value = getattr(request, name)
+                if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                    raise ValueError(f"{name} must be a nonempty string of at most 256 characters")
+            if not isinstance(request.messages, tuple) or not request.messages:
+                raise ValueError("messages must be a nonempty tuple")
+            if any(not isinstance(item, AddMessage) for item in request.messages):
+                raise ValueError("messages must contain AddMessage values")
+            ordinals = tuple(item.ordinal for item in request.messages)
+            if any(type(value) is not int or value < 0 for value in ordinals):
+                raise ValueError("message ordinals must be nonnegative integers")
+            if ordinals != tuple(range(len(request.messages))):
+                raise ValueError("message ordinals must be ordered and contiguous from zero")
+
+            now = utc_now()
+            normalized = []
+            for item in request.messages:
+                if not isinstance(item.text, str) or not item.text.strip():
+                    raise ValueError("message text must be nonempty")
+                if not isinstance(item.source_name, str) or not item.source_name.strip():
+                    raise ValueError("message source_name must be nonempty")
+                event_time = _observed_at(item.observed_at, now)
+                normalized.append((item, event_time))
+            canonical = {
+                "user_id": request.user_id,
+                "session_id": request.session_id,
+                "messages": [{"ordinal": item.ordinal, "text": item.text,
+                              "observed_at": (event_time.isoformat()
+                                              if item.observed_at is not None else None),
+                              "source_name": item.source_name}
+                             for item, event_time in normalized],
+            }
+            payload_hash = hashlib.sha256(json.dumps(
+                canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")).hexdigest()
+            namespace = f"syune:add:{request.user_id}:{request.session_id}:{request.request_id}"
+            security = SecurityEnvelope(owner=f"user:{request.user_id}")
+            entities = []
+            results = []
+            for item, event_time in normalized:
+                source_id = SourceId(uuid5(NAMESPACE_URL, f"{namespace}:{item.ordinal}:source"))
+                observation_id = ObservationId(uuid5(NAMESPACE_URL, f"{namespace}:{item.ordinal}:observation"))
+                provenance_id = ProvenanceId(uuid5(NAMESPACE_URL, f"{namespace}:{item.ordinal}:provenance"))
+                source = Source(source_id, "agent-memory", item.source_name, now, security=security)
+                observation = Observation(observation_id, item.text, "text",
+                    Provenance(provenance_id, source_id, now, process_id="syune.add_batch",
+                               pipeline_version="lean-v1"),
+                    event_time, now, Confidence(1.0), security=security)
+                entities.extend((source, observation))
+                results.append({"ordinal": item.ordinal, "source_id": f"SourceId:{source_id}",
+                                "memory_id": f"ObservationId:{observation_id}",
+                                "observed_at": event_time.isoformat().replace("+00:00", "Z"),
+                                "created_at": now.isoformat().replace("+00:00", "Z")})
+            data = {"request_id": request.request_id, "user_id": request.user_id,
+                    "session_id": request.session_id, "payload_hash": payload_hash,
+                    "messages": results}
+            try:
+                replayed, durable = self.__runtime.memory.put_idempotent_batch(
+                    user_id=request.user_id, session_id=request.session_id,
+                    request_id=request.request_id, payload_hash=payload_hash,
+                    entities=tuple(entities), result=data,
+                    global_request_id=global_request_id)
+            except IdempotencyConflictError as exc:
+                raise SyuneError("IDEMPOTENCY_CONFLICT", str(exc), ErrorCategory.CONFLICT,
+                                 correlation_id=cid, operation_id=request.request_id) from None
+            # The index is derivative. A committed request is not acknowledged until
+            # this runtime has synchronized it; retry/restart safely repeats this step.
+            self.__runtime.index.sync()
+            resource_ids = tuple(item["memory_id"] for item in durable["messages"])
+            self.__runtime.audit.record(
+                operation_id=request.request_id, correlation_id=cid,
+                operation_type="batch_add", outcome="REPLAY" if replayed else "SUCCESS",
+                principal={"user_id": request.user_id}, resource_ids=resource_ids,
+                detail={"session_id": request.session_id, "payload_hash": payload_hash,
+                        "message_count": len(request.messages)},
+            )
+            return BatchAddResult(cid, durable)
         return self._call(request.correlation_id, operation)
 
     def revise(self, request: ReviseRequest) -> RevisionResult:

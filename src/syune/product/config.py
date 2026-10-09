@@ -76,8 +76,8 @@ class SyuneConfig:
     telemetry: bool = False
 
     def __post_init__(self) -> None:
-        if not 1 <= self.retrieval.max_results <= 32:
-            raise ValueError("retrieval.max_results must be 1..32")
+        if not 1 <= self.retrieval.max_results <= 100:
+            raise ValueError("retrieval.max_results must be 1..100")
         if self.logging.level not in LOG_LEVELS:
             raise ValueError("logging.level must be ERROR, WARNING, INFO, or DEBUG")
         if self.telemetry:

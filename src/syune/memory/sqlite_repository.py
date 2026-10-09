@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -35,6 +36,10 @@ _TYPES = {cls.__name__: cls for cls in (
 )}
 _ENUMS = {item.__name__: item for item in (EvidencePolarity, TruthState, ContradictionKind, Sensitivity, DefaultAccessPolicy, LifecycleState, MemoryClass)}
 _ENTITIES = (Source, Observation, Concept, Claim, Evidence, Episode, Procedure, MemoryTrace)
+
+
+class IdempotencyConflictError(ValueError):
+    """A scoped request ID was reused with different canonical content."""
 
 
 def _encode(value: object) -> object:
@@ -85,8 +90,11 @@ class SQLiteMemoryRepository:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.path)
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
         self._db.execute("PRAGMA foreign_keys = ON")
+        self._db.execute("PRAGMA busy_timeout = 30000")
+        self._db.execute("PRAGMA synchronous = FULL")
         try:
             with self._db:
                 self._db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -118,6 +126,13 @@ class SQLiteMemoryRepository:
                     fingerprint TEXT, payload TEXT NOT NULL, PRIMARY KEY(id_type,id_value))""")
                 self._db.execute("CREATE INDEX IF NOT EXISTS lifecycle_state ON lifecycle(state)")
                 self._db.execute("CREATE INDEX IF NOT EXISTS lifecycle_fingerprint ON lifecycle(fingerprint,state)")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS idempotent_ingestion (
+                    user_id TEXT NOT NULL, session_id TEXT NOT NULL, request_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL, result_json TEXT NOT NULL, completed_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id,session_id,request_id))""")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS global_ingestion_requests (
+                    request_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL)""")
                 self._db.execute("""CREATE TABLE IF NOT EXISTS lifecycle_events (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
                     id_type TEXT NOT NULL, id_value TEXT NOT NULL, occurred_at TEXT NOT NULL,
@@ -144,23 +159,86 @@ class SQLiteMemoryRepository:
     def put_many(self, entities: tuple[MemoryObject, ...]) -> None:
         if not isinstance(entities, tuple):
             raise TypeError("entities must be a tuple")
-        with self._db:
-            for entity in entities:
-                if not isinstance(entity, _ENTITIES):
-                    raise TypeError("unsupported memory entity")
-                if self._exists(entity.id):
-                    raise DuplicateIdError(f"duplicate entity ID: {entity.id}")
-                if isinstance(entity, Evidence) and any(not self._exists(cid) for cid in entity.claim_ids):
-                    raise MissingEndpointError("evidence claim IDs must exist")
-                if isinstance(entity, MemoryTrace) and not self._exists(entity.entity_id):
-                    raise MissingEndpointError("trace target must exist")
-                payload = json.dumps(_encode(entity), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-                self._db.execute("INSERT INTO entities VALUES (?,?,?,?)", (*_key(entity.id), type(entity).__name__, payload))
-                self._db.execute("INSERT INTO change_journal(operation,id_type,id_value) VALUES ('INSERT',?,?)", _key(entity.id))
-                record=LifecycleRecord(entity.id,created_at=getattr(entity,"created_at",None) or getattr(entity,"registered_at"),
-                    memory_class=MemoryClass.ORGANIZATIONAL if isinstance(entity,Source) else MemoryClass.SEMANTIC,
-                    protected=isinstance(entity,Source))
-                self._db.execute("INSERT INTO lifecycle VALUES (?,?,?,?,?)", (*_key(entity.id),record.state.value,None,json.dumps(_encode(record),sort_keys=True,separators=(",",":"))))
+        with self._lock, self._db:
+            self._insert_entities(entities)
+
+    def _insert_entities(self, entities: tuple[MemoryObject, ...]) -> None:
+        """Insert entities inside the caller's active SQLite transaction."""
+        for entity in entities:
+            if not isinstance(entity, _ENTITIES):
+                raise TypeError("unsupported memory entity")
+            if self._exists(entity.id):
+                raise DuplicateIdError(f"duplicate entity ID: {entity.id}")
+            if isinstance(entity, Evidence) and any(not self._exists(cid) for cid in entity.claim_ids):
+                raise MissingEndpointError("evidence claim IDs must exist")
+            if isinstance(entity, MemoryTrace) and not self._exists(entity.entity_id):
+                raise MissingEndpointError("trace target must exist")
+            payload = json.dumps(_encode(entity), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            self._db.execute("INSERT INTO entities VALUES (?,?,?,?)", (*_key(entity.id), type(entity).__name__, payload))
+            self._db.execute("INSERT INTO change_journal(operation,id_type,id_value) VALUES ('INSERT',?,?)", _key(entity.id))
+            record=LifecycleRecord(entity.id,created_at=getattr(entity,"created_at",None) or getattr(entity,"registered_at"),
+                memory_class=MemoryClass.ORGANIZATIONAL if isinstance(entity,Source) else MemoryClass.SEMANTIC,
+                protected=isinstance(entity,Source))
+            self._db.execute("INSERT INTO lifecycle VALUES (?,?,?,?,?)", (*_key(entity.id),record.state.value,None,json.dumps(_encode(record),sort_keys=True,separators=(",",":"))))
+
+    def put_idempotent_batch(self, *, user_id: str, session_id: str, request_id: str,
+                             payload_hash: str, entities: tuple[MemoryObject, ...],
+                             result: dict[str, object],
+                             global_request_id: bool = False) -> tuple[bool, dict[str, object]]:
+        """Atomically commit a batch and its completed-request record.
+
+        Returns ``(replayed, result)``. A reused scoped request ID with a different
+        canonical payload is rejected before any entity mutation.
+        """
+        from datetime import datetime, timezone
+        result_json = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                if global_request_id:
+                    global_row = self._db.execute(
+                        "SELECT user_id,session_id,payload_hash FROM global_ingestion_requests "
+                        "WHERE request_id=?", (request_id,),
+                    ).fetchone()
+                    expected = (user_id, session_id, payload_hash)
+                    if global_row is not None and tuple(global_row) != expected:
+                        raise IdempotencyConflictError(
+                            "request_id already belongs to a different AML request")
+                row = self._db.execute(
+                    "SELECT payload_hash,result_json FROM idempotent_ingestion "
+                    "WHERE user_id=? AND session_id=? AND request_id=?",
+                    (user_id, session_id, request_id),
+                ).fetchone()
+                if row is not None:
+                    if row[0] != payload_hash:
+                        raise IdempotencyConflictError(
+                            "request_id already completed with a different payload")
+                    restored = json.loads(row[1])
+                    self._db.commit()
+                    self._idempotent_fault("after_commit")
+                    return True, restored
+                self._insert_entities(entities)
+                self._db.execute(
+                    "INSERT INTO idempotent_ingestion VALUES (?,?,?,?,?,?)",
+                    (user_id, session_id, request_id, payload_hash, result_json,
+                     datetime.now(timezone.utc).isoformat()),
+                )
+                if global_request_id:
+                    self._db.execute(
+                        "INSERT INTO global_ingestion_requests VALUES (?,?,?,?)",
+                        (request_id, user_id, session_id, payload_hash),
+                    )
+                self._idempotent_fault("before_commit")
+                self._db.commit()
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
+            self._idempotent_fault("after_commit")
+            return False, result
+
+    def _idempotent_fault(self, stage: str) -> None:
+        """Deterministic no-op fault point used by crash-recovery tests."""
 
     def replace(self, entity: MemoryObject, operation: str = "UPDATE") -> None:
         if not isinstance(entity, _ENTITIES) or not self._exists(entity.id): raise KeyError(entity.id)

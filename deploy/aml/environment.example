@@ -1,0 +1,11 @@
+# Non-secret application settings. Use an absolute, evaluation-only path.
+SYUNE_AML_STATE_ROOT=/var/lib/syune-aml
+SYUNE_AML_MAX_BODY_BYTES=1048576
+SYUNE_AML_MAX_CONCURRENCY=4
+SYUNE_AML_QUEUE_WAIT_SECONDS=1
+SYUNE_AML_MIN_FREE_BYTES=1073741824
+
+# Paths only. Never put secret or key contents in this file.
+SYUNE_AML_BEARER_TOKEN_FILE=/secure/operator/path/aml-bearer-token
+SYUNE_AML_TLS_CERT_FILE=/secure/operator/path/fullchain.pem
+SYUNE_AML_TLS_KEY_FILE=/secure/operator/path/privkey.pem

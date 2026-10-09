@@ -1,0 +1,217 @@
+name: AML container release-candidate validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aml-container-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Ubuntu Docker and regression validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      COMPOSE_FILE: deploy/aml/compose.yaml
+      COMPOSE_PROJECT_NAME: syuneamlci
+    steps:
+      - name: Check out requested source revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Python runtime
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12.10"
+
+      - name: Verify runner and immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker compose version
+          grep -F 'python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db' deploy/aml/Dockerfile >/dev/null
+          grep -F 'nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284' deploy/aml/compose.yaml >/dev/null
+          printf '%s  %s\n' \
+            '93dceadc5cb5da8cc19ae93b4c24fd8040787410146bcdc5b05d22ed07c17324' uv.lock \
+            'cdf087571d1888813a6f7e37996251e6d3b58b3750b41094ed7b53b963141844' pyproject.toml \
+            | sha256sum --check --strict
+
+      - name: Create ephemeral credentials and TLS fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir="$RUNNER_TEMP/syune-aml-ci"
+          install -d -m 0700 "$fixture_dir"
+          token="$(openssl rand -hex 32)"
+          printf '%s' "$token" > "$fixture_dir/bearer-token"
+          chmod 0600 "$fixture_dir/bearer-token"
+          echo "::add-mask::$token"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=localhost' \
+            -keyout "$fixture_dir/privkey.pem" \
+            -out "$fixture_dir/fullchain.pem" >/dev/null 2>&1
+          chmod 0600 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
+          {
+            echo "SYUNE_AML_BEARER_TOKEN_FILE=$fixture_dir/bearer-token"
+            echo "SYUNE_AML_TLS_CERT_FILE=$fixture_dir/fullchain.pem"
+            echo "SYUNE_AML_TLS_KEY_FILE=$fixture_dir/privkey.pem"
+            echo "AML_CI_FIXTURE_DIR=$fixture_dir"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate Compose rendering
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose config --quiet
+          docker compose config > "$RUNNER_TEMP/compose.resolved.yaml"
+          if grep -F -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/compose.resolved.yaml"; then
+            echo 'Temporary credential leaked into rendered Compose configuration.' >&2
+            exit 1
+          fi
+
+      - name: Install locked Python environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'uv==0.12.24'
+          uv sync --frozen
+
+      - name: Run complete repository regression suite
+        shell: bash
+        run: uv run python -m pytest -q
+
+      - name: Build digest-pinned application image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose build --pull app
+          image_id="$(docker compose images -q app)"
+          test -n "$image_id"
+          test "$(docker image inspect --format '{{.Config.User}}' "$image_id")" = '10001:10001'
+          docker history --no-trunc "$image_id" > "$RUNNER_TEMP/image-history.txt"
+          if grep -F -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/image-history.txt"; then
+            echo 'Temporary credential leaked into image history.' >&2
+            exit 1
+          fi
+          docker save --output "$RUNNER_TEMP/application-image.tar" "$image_id"
+          if grep -aF -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/application-image.tar"; then
+            echo 'Temporary credential leaked into image layers.' >&2
+            exit 1
+          fi
+          rm -f "$RUNNER_TEMP/application-image.tar" "$RUNNER_TEMP/image-history.txt"
+
+      - name: Start complete isolated stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose up --detach --no-build
+          for attempt in $(seq 1 120); do
+            if curl --silent --show-error --fail --insecure \
+              https://127.0.0.1/health > "$RUNNER_TEMP/health.json"; then
+              break
+            fi
+            if [ "$attempt" -eq 120 ]; then
+              echo 'Stack did not become healthy.' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(cat "$RUNNER_TEMP/health.json")" = '{"status":"ok"}'
+
+      - name: Verify container security and storage controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_id="$(docker compose ps -q app)"
+          proxy_id="$(docker compose ps -q proxy)"
+          test -n "$app_id" && test -n "$proxy_id"
+          test "$(docker inspect --format '{{.Config.User}}' "$app_id")" = '10001:10001'
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$app_id")" = 'true'
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$proxy_id")" = 'true'
+          test "$(docker inspect --format '{{.HostConfig.Memory}}' "$app_id")" = '2147483648'
+          test "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$app_id")" = '2000000000'
+          test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$app_id")" = '256'
+          test "$(docker inspect --format '{{.HostConfig.Memory}}' "$proxy_id")" = '268435456'
+          test "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "$proxy_id")" = '1000000000'
+          test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$proxy_id")" = '128'
+          docker inspect --format '{{json .HostConfig.CapDrop}}' "$app_id" | grep -F 'ALL'
+          docker inspect --format '{{json .HostConfig.CapDrop}}' "$proxy_id" | grep -F 'ALL'
+          docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$app_id" | grep -F 'no-new-privileges'
+          docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$proxy_id" | grep -F 'no-new-privileges'
+          docker inspect --format '{{json .Config.Cmd}}' "$app_id" | grep -F -- '--workers'
+          docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/syune-aml"}}{{.Type}}{{end}}{{end}}' "$app_id" | grep -Fx volume
+          docker compose exec -T app sh -ec '
+            test "$(id -u):$(id -g)" = "10001:10001"
+            test "$(stat -c "%u:%g" /var/lib/syune-aml)" = "10001:10001"
+            touch /var/lib/syune-aml/cache/container-write-probe
+            ! touch /etc/read-only-probe 2>/dev/null
+            test -f /var/lib/syune-aml/memory/memory.sqlite3
+          '
+          docker compose exec -T proxy nginx -t
+
+      - name: Exercise authenticated Add Search and 100-result recall
+        shell: bash
+        run: |
+          set -euo pipefail
+          python deploy/aml/cloud_container_probe.py \
+            --phase initial --base https://127.0.0.1 \
+            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+
+      - name: Verify shutdown transition restart persistence and concurrency
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose stop app
+          status="$(curl --silent --insecure --output /dev/null --write-out '%{http_code}' https://127.0.0.1/health || true)"
+          test "$status" != '200'
+          docker compose start app
+          python deploy/aml/cloud_container_probe.py \
+            --phase after-restart --base https://127.0.0.1 \
+            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+          docker compose restart --timeout 30 app
+          python deploy/aml/cloud_container_probe.py \
+            --phase persistence --base https://127.0.0.1 \
+            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+
+      - name: Verify proxy limits and Retry-After
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 3
+          python deploy/aml/cloud_container_probe.py \
+            --phase limits --base https://127.0.0.1 \
+            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+
+      - name: Verify runtime logs are payload and credential free
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/container-runtime.log"
+          docker compose logs --no-color > "$log_file" 2>&1 || true
+          payload_marker="$(python -c 'from deploy.aml.cloud_container_probe import PRIVATE_MARKER; print(PRIVATE_MARKER)')"
+          for forbidden in \
+            "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" \
+            "$payload_marker" \
+            'Authorization: Bearer'; do
+            if grep -F -- "$forbidden" "$log_file"; then
+              echo 'Sensitive value found in container logs.' >&2
+              exit 1
+            fi
+          done
+          rm -f "$log_file"
+
+      - name: Remove synthetic stack and credentials
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          docker compose down --volumes --remove-orphans --timeout 30
+          rm -rf -- "$AML_CI_FIXTURE_DIR" \
+            "$RUNNER_TEMP/compose.resolved.yaml" "$RUNNER_TEMP/health.json"

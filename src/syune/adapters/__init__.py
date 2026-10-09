@@ -1,0 +1,1 @@
+"""Isolated external protocol adapters."""

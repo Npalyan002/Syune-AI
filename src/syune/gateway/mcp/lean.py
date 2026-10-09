@@ -29,8 +29,10 @@ def create_lean_mcp_server(client: Syune) -> MCPServer:
             "transport": "stdio", "experimental": ["research_compatibility"]}
 
     @server.tool(name="syune_remember", structured_output=True)
-    async def remember(text: str, source_name: str = "direct-memory", correlation_id: str | None = None) -> dict[str, object]:
-        return call(lambda: client.remember(RememberRequest(text, source_name, correlation_id=correlation_id)))
+    async def remember(text: str, source_name: str = "direct-memory", correlation_id: str | None = None,
+                       observed_at: str | None = None) -> dict[str, object]:
+        return call(lambda: client.remember(RememberRequest(
+            text, source_name, correlation_id=correlation_id, observed_at=observed_at)))
 
     @server.tool(name="syune_context", structured_output=True)
     async def context(cue: str, max_results: int = 8, provenance_mode: str = "STANDARD",

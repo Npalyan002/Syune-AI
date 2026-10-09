@@ -8,7 +8,7 @@ from .repository import (
     DuplicateIdError, InMemoryReferenceRepository, MemoryRepository,
     MissingEndpointError,
 )
-from .sqlite_repository import SQLiteMemoryRepository
+from .sqlite_repository import IdempotencyConflictError, SQLiteMemoryRepository
 from .truth import (
     ALLOWED_TRANSITIONS, QueryMode, TruthAuditEvent, VerificationPolicy,
     classify_disagreement, temporally_eligible, validate_transition,
@@ -24,7 +24,7 @@ __all__ = [
     "ActivationState", "Association", "Claim", "Concept", "Episode",
     "Evidence", "EvidencePolarity", "ContradictionKind", "MemoryTrace", "Observation", "Procedure",
     "Provenance", "Source", "SourceLocator", "TruthMetadata", "TruthState", "DuplicateIdError",
-    "InMemoryReferenceRepository", "SQLiteMemoryRepository", "MemoryRepository", "MissingEndpointError",
+    "InMemoryReferenceRepository", "SQLiteMemoryRepository", "IdempotencyConflictError", "MemoryRepository", "MissingEndpointError",
     "ALLOWED_TRANSITIONS", "QueryMode", "TruthAuditEvent", "VerificationPolicy",
     "classify_disagreement", "temporally_eligible", "validate_transition",
     "AccessAuditEvent", "AccessContext", "AuthorizationDecision", "AuthorizationDecisionCode",

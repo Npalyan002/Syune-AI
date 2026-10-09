@@ -16,7 +16,7 @@ def test_precedence_defaults_file_environment_cli(tmp_path, monkeypatch):
     assert from_cli.state.root==cli_root and from_cli.logging.level=='DEBUG'
 
 
-@pytest.mark.parametrize('body',["unknown=1",'[retrieval]\nmax_results=1000',
+@pytest.mark.parametrize('body',["unknown=1",'[retrieval]\nmax_results=101',
     '[logging]\nlevel="TRACE"','[study]\nroots=["relative"]','[mcp]\nshadow_read_only="yes"'])
 def test_malformed_or_unsafe_config_fails_closed(tmp_path,body):
     config=(tmp_path/'config.toml').resolve();config.write_text(body)
@@ -24,7 +24,7 @@ def test_malformed_or_unsafe_config_fails_closed(tmp_path,body):
 
 
 def test_environment_safety_bounds_and_telemetry(tmp_path,monkeypatch):
-    monkeypatch.setenv('SYUNE_MAX_RECALL_RESULTS','33')
+    monkeypatch.setenv('SYUNE_MAX_RECALL_RESULTS','101')
     with pytest.raises(ValueError):load_config(cli_state_root=tmp_path.resolve())
     monkeypatch.delenv('SYUNE_MAX_RECALL_RESULTS');monkeypatch.setenv('SYUNE_TELEMETRY','1')
     assert load_config(cli_state_root=tmp_path.resolve()).telemetry is False

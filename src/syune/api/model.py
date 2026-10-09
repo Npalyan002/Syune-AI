@@ -102,6 +102,24 @@ class RememberRequest:
     owner: str | None = None
     allowed_principals: tuple[str, ...] = ()
     correlation_id: str | None = None
+    observed_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AddMessage:
+    ordinal: int
+    text: str
+    observed_at: str | None = None
+    source_name: str = "agent-memory"
+
+
+@dataclass(frozen=True, slots=True)
+class BatchAddRequest:
+    request_id: str
+    user_id: str
+    session_id: str
+    messages: tuple[AddMessage, ...]
+    correlation_id: str | None = None
 
 @dataclass(frozen=True, slots=True)
 class ReviseRequest:
@@ -225,6 +243,7 @@ class StudyResult(PublicResult): pass
 class SourceStatusResult(PublicResult): pass
 class MemoryResult(PublicResult): pass
 class RememberResult(PublicResult): pass
+class BatchAddResult(PublicResult): pass
 class RevisionResult(PublicResult): pass
 class HistoryResult(PublicResult): pass
 class ModelResult(PublicResult): pass
@@ -279,8 +298,8 @@ class SyuneHandshake:
 
 __all__ = [
     "RuntimeMode", "SideEffectClass", "DiagnosticsLevel", "ProvenanceMode", "TypedId", "HostSessionId", "CorrelationId",
-    "HostContext", "StudyRequest", "RememberRequest", "ReviseRequest", "RecallRequest", "ContextRequest", "CognitiveRequest", "CouncilRequest", "PlanRequest",
+    "HostContext", "StudyRequest", "RememberRequest", "AddMessage", "BatchAddRequest", "ReviseRequest", "RecallRequest", "ContextRequest", "CognitiveRequest", "CouncilRequest", "PlanRequest",
     "ExecutionRequest", "PublicResult", "StudyResult", "SourceStatusResult", "MemoryResult", "RecallResult",
-    "RememberResult", "RevisionResult", "HistoryResult", "ModelResult", "ContextResult", "AuditResult", "CognitiveResult", "CouncilResult", "PlanResult", "ExecutionResult", "HealthResult", "StatusResult",
+    "RememberResult", "BatchAddResult", "RevisionResult", "HistoryResult", "ModelResult", "ContextResult", "AuditResult", "CognitiveResult", "CouncilResult", "PlanResult", "ExecutionResult", "HealthResult", "StatusResult",
     "Capability", "CapabilitySummary", "SyuneHandshake",
 ]

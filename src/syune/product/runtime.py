@@ -7,7 +7,7 @@ import warnings
 from syune.context import ContextService
 from syune.audit import SQLiteAuditStore
 from syune.memory import SQLiteMemoryRepository
-from syune.retrieval import InvertedSeedIndex, RetrievalService
+from syune.retrieval import InvertedSeedIndex, RetrievalConfig as NativeRetrievalConfig, RetrievalService
 from syune.study import SqliteStudyRegistry, StudyService
 from .config import SyuneConfig
 from .state import DATABASES, load_metadata, missing_databases, record_successful_open
@@ -44,14 +44,16 @@ class SyuneRuntime:
             memory = SQLiteMemoryRepository(root / DATABASES["memory"]); opened.append(memory)
             registry = SqliteStudyRegistry(root / DATABASES["study_perception"]); opened.append(registry)
             index = InvertedSeedIndex(memory); index.rebuild()
-            retrieval = RetrievalService(memory, index)
+            retrieval_config = NativeRetrievalConfig(max_results=config.retrieval.max_results)
+            retrieval = RetrievalService(memory, index, retrieval_config)
             audit = SQLiteAuditStore(root / DATABASES["audit"]); opened.append(audit)
             runtime = cls(config, metadata, memory, registry, index, retrieval,
                           ContextService(memory, retrieval, audit), StudyService(registry, memory), audit)
             if config.features.learning:
                 from syune.learning import SQLiteLearningStore, StorePlasticityView
                 runtime.learning = SQLiteLearningStore(root / DATABASES["learning"]); opened.append(runtime.learning)
-                runtime.retrieval = RetrievalService(memory, index, plasticity=StorePlasticityView(runtime.learning))
+                runtime.retrieval = RetrievalService(memory, index, retrieval_config,
+                                                     plasticity=StorePlasticityView(runtime.learning))
                 runtime.context = ContextService(memory, runtime.retrieval, audit)
             if config.features.research_cognition: runtime.enable_research(warn=False)
             runtime.metadata = record_successful_open(root, metadata)

@@ -1,0 +1,44 @@
+manifest_version = 1
+application = "syune-aml-textual-adapter"
+proposed_version = "1.1.1-aml.1"
+python = "3.12.10"
+uv = "0.12.24"
+baseline_commit = "fb76ca390d0774a95a522517d129730c3446a312"
+baseline_tag = "v1.1.0"
+source_state = "baseline plus uncommitted Phase 02A-04B-2 changes; not the historical v1.1.0 tag"
+dependency_lock = "uv.lock"
+dependency_lock_sha256 = "93dceadc5cb5da8cc19ae93b4c24fd8040787410146bcdc5b05d22ed07c17324"
+pyproject_sha256 = "cdf087571d1888813a6f7e37996251e6d3b58b3750b41094ed7b53b963141844"
+
+[runtime]
+application_processes = 1
+uvicorn_workers = 1
+application_concurrency = 4
+server_connection_limit = 8
+request_body_bytes = 1048576
+queue_wait_seconds = 1
+minimum_free_bytes = 1073741824
+upstream_timeout_seconds = 1800
+graceful_shutdown_seconds = 1800
+application_memory_bytes = 2147483648
+application_cpus = 2.0
+application_pids = 256
+proxy_memory_bytes = 268435456
+proxy_cpus = 1.0
+proxy_pids = 128
+
+[images]
+application_base = "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+application_linux_amd64 = "sha256:97983fa8cc88343512862c62307159a82261c3528dc025f79e5a3f7af43e50b4"
+reverse_proxy = "nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284"
+reverse_proxy_linux_amd64 = "sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c"
+digest_registry = "registry-1.docker.io"
+digest_verified_at = "2026-10-09"
+immutable_digest_status = "OCI indexes fetched and SHA-256 recomputed; Docker build remains blocked locally"
+
+[cloud_validation]
+workflow = ".github/workflows/aml-container-validation.yml"
+runner = "ubuntu-24.04"
+trigger = "workflow_dispatch only"
+permissions = "contents: read"
+status = "prepared but not executed"

@@ -6,7 +6,8 @@ correlation ID and serializable `data`.
 
 | Operation | Primary arguments | Result | Authorization/persistence |
 |---|---|---|---|
-| `remember` | text or `RememberRequest` | `RememberResult` | writes source + observation; optional security envelope |
+| `remember` | text or `RememberRequest`; optional aware ISO 8601 `observed_at` | `RememberResult` | writes source + observation; optional security envelope |
+| `add_batch` | `BatchAddRequest` with scoped request ID and ordered messages | `BatchAddResult` | atomic durable idempotent source + observation writes |
 | `context` | cue/`ContextRequest`, identity, purpose, provenance mode | `ContextResult` | authorized bounded context; durable correlated audit |
 | `revise` | typed memory ID, replacement content, identity/purpose | `RevisionResult` | requires access; old immutable; new revision persists |
 | `forget` | typed memory ID, reason | `MemoryResult` | durable lifecycle exclusion and audit |
@@ -19,6 +20,30 @@ Recall, memory lookup, Study/source status, status, capabilities and handshake a
 stable v1 support surfaces. Principal identity is a user, agent, or service plus optional
 organization/project/department scopes. Secured records deny missing principals, wrong
 purpose and wrong scope with stable typed errors.
+
+`RememberRequest.observed_at` is the source/event time. It must include `Z` or an
+explicit UTC offset and is normalized to UTC. If omitted, it retains the historical
+behavior of using the ingestion instant. It does not set fact-validity time. Source
+registration, provenance creation, observation creation, and truth recording remain
+separate ingestion/knowledge concepts.
+
+## Idempotent batch ingestion
+
+`Syune.add_batch()` is the reusable boundary for a future Agent Memory Leaderboard HTTP
+adapter. A request contains a nonempty `request_id`, exact `user_id` and `session_id`, and
+a nonempty tuple of `AddMessage` values whose ordinals are contiguous from zero. Request
+ID uniqueness is scoped to the exact `(user_id, session_id)` pair.
+
+SYUNE hashes the canonical normalized message payload. Repeating the same scoped request
+ID and payload returns the original durable result and identifiers. Reusing it with a
+different payload raises `IDEMPOTENCY_CONFLICT` without modifying memory. Each message is
+stored as one owned Source and one owned Observation with deterministic IDs.
+
+Entities, lifecycle rows, change-journal rows, and the completed idempotency record commit
+in one SQLite `BEGIN IMMEDIATE` transaction. A crash before commit leaves no batch. A
+crash after commit is a completed request: retry returns its stored result, synchronizes
+the derived retrieval index, and only then acknowledges success. The audit database is a
+separate downstream journal and is not the authority for idempotency or memory atomicity.
 
 `SyuneError` exposes `code`, message, category, retryable/blocked metadata, safe resource
 and operation IDs, and correlation ID. Stable codes include `UNAUTHORIZED`,
