@@ -1,4 +1,4 @@
-name: SYUNE v1.1 cross-platform acceptance
+name: SYUNE 2.0.0 cross-platform acceptance
 
 on:
   workflow_dispatch:
