@@ -51,8 +51,10 @@ jobs:
           fixture_dir="$RUNNER_TEMP/syune-aml-ci"
           install -d -m 0700 "$fixture_dir"
           token="$(openssl rand -hex 32)"
-          printf '%s' "$token" > "$fixture_dir/bearer-token"
-          chmod 0600 "$fixture_dir/bearer-token"
+          printf '%s' "$token" > "$fixture_dir/bearer-token-client"
+          chmod 0600 "$fixture_dir/bearer-token-client"
+          sudo install -o 10001 -g 10001 -m 0400 \
+            "$fixture_dir/bearer-token-client" "$fixture_dir/bearer-token-container"
           echo "::add-mask::$token"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -subj '/CN=localhost' \
@@ -60,7 +62,8 @@ jobs:
             -out "$fixture_dir/fullchain.pem" >/dev/null 2>&1
           chmod 0600 "$fixture_dir/privkey.pem" "$fixture_dir/fullchain.pem"
           {
-            echo "SYUNE_AML_BEARER_TOKEN_FILE=$fixture_dir/bearer-token"
+            echo "SYUNE_AML_BEARER_TOKEN_FILE=$fixture_dir/bearer-token-container"
+            echo "AML_CI_CLIENT_TOKEN_FILE=$fixture_dir/bearer-token-client"
             echo "SYUNE_AML_TLS_CERT_FILE=$fixture_dir/fullchain.pem"
             echo "SYUNE_AML_TLS_KEY_FILE=$fixture_dir/privkey.pem"
             echo "AML_CI_FIXTURE_DIR=$fixture_dir"
@@ -72,7 +75,7 @@ jobs:
           set -euo pipefail
           docker compose config --quiet
           docker compose config > "$RUNNER_TEMP/compose.resolved.yaml"
-          if grep -F -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/compose.resolved.yaml"; then
+          if grep -F -- "$(cat "$AML_CI_CLIENT_TOKEN_FILE")" "$RUNNER_TEMP/compose.resolved.yaml"; then
             echo 'Temporary credential leaked into rendered Compose configuration.' >&2
             exit 1
           fi
@@ -97,12 +100,12 @@ jobs:
           test -n "$image_id"
           test "$(docker image inspect --format '{{.Config.User}}' "$image_id")" = '10001:10001'
           docker history --no-trunc "$image_id" > "$RUNNER_TEMP/image-history.txt"
-          if grep -F -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/image-history.txt"; then
+          if grep -F -- "$(cat "$AML_CI_CLIENT_TOKEN_FILE")" "$RUNNER_TEMP/image-history.txt"; then
             echo 'Temporary credential leaked into image history.' >&2
             exit 1
           fi
           docker save --output "$RUNNER_TEMP/application-image.tar" "$image_id"
-          if grep -aF -- "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" "$RUNNER_TEMP/application-image.tar"; then
+          if grep -aF -- "$(cat "$AML_CI_CLIENT_TOKEN_FILE")" "$RUNNER_TEMP/application-image.tar"; then
             echo 'Temporary credential leaked into image layers.' >&2
             exit 1
           fi
@@ -174,6 +177,7 @@ jobs:
           docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/syune-aml"}}{{.Type}}{{end}}{{end}}' "$app_id" | grep -Fx volume
           docker compose exec -T app sh -ec '
             test "$(id -u):$(id -g)" = "10001:10001"
+            test "$(stat -c "%u:%g:%a" /run/secrets/aml_bearer_token)" = "10001:10001:400"
             test "$(stat -c "%u:%g" /var/lib/syune-aml)" = "10001:10001"
             touch /var/lib/syune-aml/cache/container-write-probe
             ! touch /etc/read-only-probe 2>/dev/null
@@ -187,7 +191,7 @@ jobs:
           set -euo pipefail
           python deploy/aml/cloud_container_probe.py \
             --phase initial --base https://127.0.0.1 \
-            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+            --token-file "$AML_CI_CLIENT_TOKEN_FILE"
 
       - name: Verify shutdown transition restart persistence and concurrency
         shell: bash
@@ -199,11 +203,11 @@ jobs:
           docker compose start app
           python deploy/aml/cloud_container_probe.py \
             --phase after-restart --base https://127.0.0.1 \
-            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+            --token-file "$AML_CI_CLIENT_TOKEN_FILE"
           docker compose restart --timeout 30 app
           python deploy/aml/cloud_container_probe.py \
             --phase persistence --base https://127.0.0.1 \
-            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+            --token-file "$AML_CI_CLIENT_TOKEN_FILE"
 
       - name: Verify proxy limits and Retry-After
         shell: bash
@@ -212,7 +216,7 @@ jobs:
           sleep 3
           python deploy/aml/cloud_container_probe.py \
             --phase limits --base https://127.0.0.1 \
-            --token-file "$SYUNE_AML_BEARER_TOKEN_FILE"
+            --token-file "$AML_CI_CLIENT_TOKEN_FILE"
 
       - name: Verify runtime logs are payload and credential free
         if: ${{ always() }}
@@ -223,7 +227,7 @@ jobs:
           docker compose logs --no-color > "$log_file" 2>&1 || true
           payload_marker="$(python -c 'from deploy.aml.cloud_container_probe import PRIVATE_MARKER; print(PRIVATE_MARKER)')"
           for forbidden in \
-            "$(cat "$SYUNE_AML_BEARER_TOKEN_FILE")" \
+            "$(cat "$AML_CI_CLIENT_TOKEN_FILE")" \
             "$payload_marker" \
             'Authorization: Bearer'; do
             if grep -F -- "$forbidden" "$log_file"; then
