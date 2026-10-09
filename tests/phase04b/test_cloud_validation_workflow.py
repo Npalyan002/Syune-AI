@@ -64,6 +64,7 @@ def test_workflow_covers_required_container_gates_without_printing_values():
 def test_compose_has_explicit_resource_and_filesystem_bounds():
     text = (ROOT / "deploy" / "aml" / "compose.yaml").read_text(encoding="utf-8")
     assert text.count("read_only: true") == 2
+    assert "image: syune-aml-rc:local" in text
     assert "mem_limit: 2g" in text and "mem_limit: 256m" in text
     assert "cpus: 2.0" in text and "cpus: 1.0" in text
     assert "pids_limit: 256" in text and "pids_limit: 128" in text

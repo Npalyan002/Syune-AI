@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           docker compose build --pull app
-          image_id="$(docker compose images -q app)"
+          image_id="$(docker image inspect --format '{{.Id}}' syune-aml-rc:local)"
           test -n "$image_id"
           test "$(docker image inspect --format '{{.Config.User}}' "$image_id")" = '10001:10001'
           docker history --no-trunc "$image_id" > "$RUNNER_TEMP/image-history.txt"
