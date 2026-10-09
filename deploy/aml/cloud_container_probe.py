@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -202,13 +203,17 @@ def limits(base: str, token: str) -> None:
     }
     status, _, response = request(base, "/add", token=token, payload=oversized)
     assert status == 413 and PRIVATE_MARKER not in str(response)
-    limited = None
-    for _ in range(64):
-        status, headers, _ = request(base, "/search", token=token, payload=search_payload())
-        if status == 429:
-            limited = headers
-            break
-    assert limited is not None and limited.get("Retry-After") == "1"
+    callers = 32
+    barrier = threading.Barrier(callers)
+
+    def burst() -> tuple[int, dict, object]:
+        barrier.wait()
+        return request(base, "/search", token=token, payload=search_payload())
+
+    with ThreadPoolExecutor(max_workers=callers) as pool:
+        responses = list(pool.map(lambda _: burst(), range(callers)))
+    limited = [headers for status, headers, _ in responses if status == 429]
+    assert limited and all(headers.get("Retry-After") == "1" for headers in limited)
 
 
 def persistence(base: str, token: str) -> None:
