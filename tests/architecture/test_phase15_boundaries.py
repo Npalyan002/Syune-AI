@@ -17,5 +17,5 @@ def test_product_has_no_legacy_network_telemetry_or_destructive_reset():
 
 def test_single_console_entry_point_and_canonical_version():
     pyproject=(ROOT/'pyproject.toml').read_text()
-    assert 'version = "1.1.0"' in pyproject and 'syune = "syune.cli.app:main"' in pyproject
-    assert '1.1.0' not in (ROOT/'src/syune/__init__.py').read_text()
+    assert 'version = "2.0.0"' in pyproject and 'syune = "syune.cli.app:main"' in pyproject
+    assert '2.0.0' not in (ROOT/'src/syune/__init__.py').read_text()

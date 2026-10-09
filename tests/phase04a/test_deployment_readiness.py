@@ -155,10 +155,10 @@ def test_locked_manifest_matches_dependency_files():
         digest = hashlib.sha256((PROJECT / name).read_bytes()).hexdigest()
         assert digest == manifest[key]
     assert manifest["runtime"]["application_processes"] == 1
-    assert manifest["proposed_version"] == "1.1.1-aml.1"
+    assert manifest["proposed_version"] == "2.0.0"
     assert "@sha256:" in manifest["images"]["application_base"]
     assert "@sha256:" in manifest["images"]["reverse_proxy"]
-    assert "uncommitted" in manifest["source_state"]
+    assert "validated baseline" in manifest["source_state"]
 
 
 def test_release_candidate_source_manifest_is_complete_and_current():

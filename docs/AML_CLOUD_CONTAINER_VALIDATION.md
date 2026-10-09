@@ -7,7 +7,7 @@ may be reported as passed until a completed run is reviewed.
 
 ## Execution prerequisites
 
-1. Commit the complete proposed `1.1.1-aml.1` source tree to a private or
+1. Commit the complete proposed `2.0.0` source tree to a private or
    appropriately controlled GitHub branch. Do not reuse the historical
    `v1.1.0` tag.
 2. Enable GitHub Actions and allow GitHub-hosted `ubuntu-24.04` runners for the
@@ -18,7 +18,7 @@ may be reported as passed until a completed run is reviewed.
 4. Keep workflow permissions at `contents: read`. No environments, repository
    secrets, OIDC tokens, package writes, artifacts, caches, or privileged
    third-party actions are required.
-5. Manually dispatch **SYUNE v1.1 cross-platform acceptance** for the exact
+5. Manually dispatch **SYUNE cross-platform acceptance** for the exact
    candidate ref. GitHub requires a dispatch target to exist on the default
    branch, so the candidate version of that already-registered workflow invokes
    the reusable **AML container release-candidate validation** workflow. Its AML

@@ -1,6 +1,7 @@
 # Public API v1
 
-Package `1.1.0` exposes the frozen public API version `1`. `Syune` is synchronous,
+Package `2.0.0` preserves the public API version `1` and adds backward-compatible
+request fields and batch-ingestion capabilities. `Syune` is synchronous,
 lifecycle-managed, persistent across restart, and returns typed result envelopes with a
 correlation ID and serializable `data`.
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.0.0 - 2026-10-09
+
+- Wire product retrieval configuration into both normal and learning-enabled runtimes,
+  retaining the default of 16 results while supporting explicit recall limits through 100.
+- Add optional timezone-aware source event timestamps to the public Remember API while
+  keeping event, ingestion, recording, and fact-validity times semantically distinct.
+- Add durable, transactional and crash-safe idempotent batch ingestion with ordered
+  messages, deterministic identifiers, payload-conflict detection, restart recovery,
+  and globally scoped AML request identifiers at the adapter boundary.
+- Add the model-free Agent Memory Leaderboard Textual Memory HTTP adapter with health,
+  authenticated Add, native evidence Search, Unix-millisecond timestamps, user isolation,
+  bounded concurrency, sanitized errors, and evaluation-only storage.
+- Add a digest-pinned, single-process SQLite deployment package with non-root read-only
+  containers, capability-free TLS proxying, rate and body limits, readiness checks,
+  redacted logging, safe evaluation-data cleanup, and manual cloud validation.
+- Preserve existing public SDK calls, native retrieval ranking/scoring/fusion,
+  authorization, temporal and lifecycle behavior, state schema 1, and working-memory
+  capacity 8. Existing callers that omit the new fields retain their prior behavior.
+
+Known limitations remain: SQLite is single-writer and single-application-process for the
+AML deployment; only Textual Memory is supported; native retrieval may legitimately
+return fewer than `top_k`; global AML `request_id` scope should be confirmed with the
+organizer; production hosting, TLS secrets, monitoring, capacity approval, and external
+backup deletion are operator responsibilities.
+
 ## 1.1.0 - 2026-10-02
 
 - Add interactive and non-interactive setup for five integration targets.

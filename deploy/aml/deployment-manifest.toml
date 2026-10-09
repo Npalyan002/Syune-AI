@@ -1,14 +1,14 @@
 manifest_version = 1
 application = "syune-aml-textual-adapter"
-proposed_version = "1.1.1-aml.1"
+proposed_version = "2.0.0"
 python = "3.12.10"
 uv = "0.12.24"
 baseline_commit = "fb76ca390d0774a95a522517d129730c3446a312"
 baseline_tag = "v1.1.0"
-source_state = "baseline plus uncommitted Phase 02A-04B-2 changes; not the historical v1.1.0 tag"
+source_state = "2.0.0 finalization descendant of validated baseline 3748400609edb8aec181b40df7a19f69c1379c6f; not the historical v1.1.0 tag"
 dependency_lock = "uv.lock"
-dependency_lock_sha256 = "93dceadc5cb5da8cc19ae93b4c24fd8040787410146bcdc5b05d22ed07c17324"
-pyproject_sha256 = "cdf087571d1888813a6f7e37996251e6d3b58b3750b41094ed7b53b963141844"
+dependency_lock_sha256 = "e9d4b0db6980a7cc1f4b1d0ed4ca834e05c144e8bbc13bb1acb6e77e026a5b30"
+pyproject_sha256 = "8b19980152eb44011183aab49b44470b797cac8a4f92d2759639f9b22bfdb836"
 
 [runtime]
 application_processes = 1
@@ -34,11 +34,14 @@ reverse_proxy = "nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf1
 reverse_proxy_linux_amd64 = "sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c"
 digest_registry = "registry-1.docker.io"
 digest_verified_at = "2026-10-09"
-immutable_digest_status = "OCI indexes fetched and SHA-256 recomputed; Docker build remains blocked locally"
+immutable_digest_status = "OCI indexes fetched and SHA-256 recomputed; digest-pinned Docker build passed on GitHub-hosted Ubuntu"
 
 [cloud_validation]
 workflow = ".github/workflows/aml-container-validation.yml"
 runner = "ubuntu-24.04"
 trigger = "workflow_dispatch through default-registered cross-platform acceptance proxy"
 permissions = "contents: read"
-status = "prepared but not executed"
+status = "validation required for each immutable candidate commit"
+validated_baseline_commit = "3748400609edb8aec181b40df7a19f69c1379c6f"
+validated_baseline_run = "https://github.com/Npalyan002/Syune-AI/actions/runs/37911437399"
+finalization_status = "requires successful rerun at the commit containing this manifest"

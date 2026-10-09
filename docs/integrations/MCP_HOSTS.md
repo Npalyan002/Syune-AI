@@ -3,7 +3,7 @@
 SYUNE 1.1 prepares a persistent integration and validates it before you touch host configuration:
 
 ```console
-pip install syune==1.1.0
+pip install syune==2.0.0
 syune setup
 syune doctor
 ```

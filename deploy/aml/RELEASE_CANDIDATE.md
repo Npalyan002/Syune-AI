@@ -1,20 +1,26 @@
-# Proposed release candidate: 1.1.1-aml.1
+# SYUNE 2.0.0 release candidate record
 
-This is a local proposal only. No commit, tag, image, release, or deployment has
-been created. It is based on historical commit
-`fb76ca390d0774a95a522517d129730c3446a312` (`v1.1.0`) plus the uncommitted
-Phase 02A through 04B-2 working-tree changes. It must not be described as the
-historical `v1.1.0` artifact.
+SYUNE 2.0.0 is the next major-release candidate built from historical baseline
+`fb76ca390d0774a95a522517d129730c3446a312` (`v1.1.0`) plus the validated Phase
+02A through 04B integration, security, reliability, and deployment work. The
+historical tag remains unchanged. Until an authorized `v2.0.0` tag and release
+exist, identify this candidate by its exact Git commit rather than by `v1.1.0`.
+
+The pre-finalization source baseline
+`3748400609edb8aec181b40df7a19f69c1379c6f` passed GitHub Actions run
+`37911437399` across Windows, macOS, Ubuntu, and the complete Ubuntu container
+stack. The version/documentation finalization commit must pass the same manual
+workflow before release authorization.
 
 ## Reproducibility evidence
 
 - Python 3.12.10 and uv 0.12.24.
-- `uv sync --check` resolves 43 packages and confirms 42 installed packages
+- `uv sync --frozen --check` confirms 42 installed packages
   without changing `uv.lock`.
 - `uv.lock` SHA-256:
-  `93dceadc5cb5da8cc19ae93b4c24fd8040787410146bcdc5b05d22ed07c17324`.
+  `e9d4b0db6980a7cc1f4b1d0ed4ca834e05c144e8bbc13bb1acb6e77e026a5b30`.
 - `pyproject.toml` SHA-256:
-  `cdf087571d1888813a6f7e37996251e6d3b58b3750b41094ed7b53b963141844`.
+  `8b19980152eb44011183aab49b44470b797cac8a4f92d2759639f9b22bfdb836`.
 - Python OCI index: `sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db`;
   Linux amd64 child: `sha256:97983fa8cc88343512862c62307159a82261c3528dc025f79e5a3f7af43e50b4`.
 - Nginx OCI index: `sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284`;
@@ -30,10 +36,11 @@ historical `v1.1.0` artifact.
 
 ## Promotion gate
 
-Promotion requires an approved immutable source commit and successful manual
+Promotion requires the immutable 2.0.0 candidate commit and a successful manual
 execution of `.github/workflows/aml-container-validation.yml` at that exact
-revision. The workflow prepares the Docker build, Compose validation, image
-inspection, container Add/Search and restart tests, log/image secret checks,
-and full regression suite. It has not been remotely executed, so all cloud
-container results remain pending. Production-equivalent capacity evidence and
-separate deployment authorization are also required.
+revision. Review Docker build, Compose validation, image inspection, Add/Search,
+100-candidate retrieval, restart recovery, log/image secret checks, cleanup,
+and the full regression suite. A successful candidate run is necessary but does
+not authorize a tag, release, package publication, AML submission, or public
+deployment. Those actions require separate approval and production capacity,
+secret, TLS, monitoring, and retention records.

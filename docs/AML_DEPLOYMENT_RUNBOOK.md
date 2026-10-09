@@ -1,9 +1,8 @@
 # SYUNE AML Deployment Runbook
 
-This package prepares the Textual Memory adapter for deployment but does not
-deploy it. The historical `v1.1.0` tag is only the baseline. Phase 02A through
-04A are uncommitted working-tree changes and must never be represented as that
-tag.
+This package prepares the SYUNE 2.0.0 Textual Memory adapter for deployment but
+does not deploy it. The historical `v1.1.0` tag remains the immutable baseline.
+The 2.0.0 candidate must be identified by its own exact commit and must never be represented as that historical tag.
 
 ## Architecture
 
@@ -80,7 +79,7 @@ idempotency.
 
 Complete and approve this record before launch:
 
-    Source revision: <immutable revision, not v1.1.0>
+    Source revision: <immutable SYUNE 2.0.0 candidate revision>
     Application base image: python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
     Proxy image: nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284
     Python / uv.lock SHA-256: <versions and hash>
