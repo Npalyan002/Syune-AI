@@ -28,7 +28,7 @@ Stable environment variables:
 | `SYUNE_STATE_ROOT` | Absolute product state root. |
 | `SYUNE_CONFIG` | Absolute TOML config path. |
 | `SYUNE_STUDY_ROOTS` | OS-path-separated approved existing Study roots. |
-| `SYUNE_MAX_RECALL_RESULTS` | MCP recall ceiling, 1 through 32. |
+| `SYUNE_MAX_RECALL_RESULTS` | Product recall ceiling, 1 through 100; default 16. |
 | `SYUNE_LOG_LEVEL` | `ERROR`, `WARNING`, `INFO`, or `DEBUG`. |
 | `SYUNE_MCP_SHADOW_READ_ONLY` | `1` starts Lean MCP in read-only shadow mode; `0` keeps the normal Lean tool surface. |
 

@@ -4,13 +4,19 @@
 
 Requirements: Python 3.12 or newer (below 4) and a writable state directory. `uv` is optional.
 
-Create a clean environment and install the published candidate (or a locally built wheel):
+Check out the immutable release and install it into a clean environment:
 
 ```powershell
+git clone https://github.com/Npalyan002/Syune-AI.git
+Set-Location Syune-AI
+git checkout v2.0.0
 py -3.12 -m venv .quickstart-venv
-.\.quickstart-venv\Scripts\python.exe -m pip install syune==2.0.0
+.\.quickstart-venv\Scripts\python.exe -m pip install .
 .\.quickstart-venv\Scripts\syune.exe --version
 ```
+
+This does not assert PyPI availability. A locally built wheel from the same immutable
+commit is also valid.
 
 Run the quickstart directly. On first use it initializes a demo state under the system
 temporary directory, then safely reuses that state on later runs:

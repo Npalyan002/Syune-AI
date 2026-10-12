@@ -1,9 +1,13 @@
 # MCP host integration
 
-SYUNE 1.1 prepares a persistent integration and validates it before you touch host configuration:
+SYUNE 2.0 prepares a persistent integration and validates it before you touch host
+configuration. Install the released source without assuming a PyPI publication:
 
 ```console
-pip install syune==2.0.0
+git clone https://github.com/Npalyan002/Syune-AI.git
+cd Syune-AI
+git checkout v2.0.0
+pip install .
 syune setup
 syune doctor
 ```

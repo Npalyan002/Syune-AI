@@ -1,11 +1,16 @@
 # Python SDK v1
 
-Install the package and initialize an absolute state root:
+Install the immutable v2.0.0 source and initialize an absolute state root:
 
 ```console
-pip install syune==2.0.0
+git clone https://github.com/Npalyan002/Syune-AI.git
+cd Syune-AI
+git checkout v2.0.0
+python -m pip install .
 syune init --state-root /absolute/path/to/state
 ```
+
+These instructions do not claim that 2.0.0 is available from PyPI.
 
 SDK v1 is synchronous, local, and in-process. It requires no LLM or provider credential
 for governed memory, context, lifecycle, audit, or Study.
@@ -74,8 +79,8 @@ knowledge-recording time, or fact-validity time. It accepts timezone-aware ISO 8
 normalizes it to UTC. Naive or malformed timestamps are rejected. Future event times are
 stored as supplied and are not silently converted into truth validity intervals.
 
-A future AML HTTP adapter receiving Unix milliseconds should convert at its boundary and
-pass the SDK an aware ISO timestamp, for example:
+The v2.0 Textual Memory HTTP adapter converts Unix milliseconds at its boundary and
+passes the SDK an aware ISO timestamp. Custom adapters should do the same, for example:
 
 ```python
 from datetime import datetime, timezone

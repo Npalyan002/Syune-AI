@@ -1,8 +1,8 @@
 # Agent Memory Leaderboard Textual HTTP adapter
 
-This local adapter implements the current published Textual Memory Add/Search contract
+This v2.0 adapter implements the current published Textual Memory Add/Search contract
 from the [official AML API guide](https://agentmemoryleaderboard.ai/api-guide), inspected
-on 2026-10-09. It is intentionally not a deployment configuration.
+on 2026-10-11. Deployment configuration is maintained separately under `deploy/aml`.
 
 ## Contract mapping
 
@@ -14,7 +14,8 @@ on 2026-10-09. It is intentionally not a deployment configuration.
 - `/add` returns exactly `success`, `request_id`, `user_id`, and `session_id` after the
   SDK transaction commits and its native retrieval index synchronizes.
 - `POST /search` accepts string `query`, exact `user_id`, `top_k` from 1 through 100,
-  and optional string `options`. Options are validated but never used to infer answers.
+  and an optional array of string `options`. Options are validated but never used to
+  infer answers.
 - `/search` calls native `Syune.recall()`. It returns candidates in native rank order as
   `{id, content, score, created_at}` and returns `{"data":[]}` for no matches.
 
@@ -23,7 +24,8 @@ state whether its namespace is global or user/session scoped. The SDK’s genera
 contract is scoped to `(user_id, session_id, request_id)`. This AML adapter deliberately
 enforces the stricter global `request_id` interpretation using a reservation committed in
 the same SQLite transaction. Reuse under another user, another session, or another
-payload returns HTTP 409. Revalidate this interpretation with AML before a formal run.
+payload returns HTTP 409. This global namespace is stricter than the SDK scope and
+should be disclosed to integrators.
 
 ## Local launch
 
@@ -73,21 +75,34 @@ JSON parsing. Validation and internal failures return sanitized responses withou
 content, database details, or secrets. No request/payload logging is configured.
 
 Calls run through a bounded executor. Each worker opens and closes its own public SDK
-client, so SQLite connections never migrate across arbitrary request threads. The state
-root config fixes native retrieval output capacity at 100. The adapter does not call a
-model, assemble context, rerank, interpret options, or produce answers.
+  client, so SQLite connections never migrate across arbitrary request threads. The state
+  root config fixes native retrieval output capacity at 100. The adapter does not call a
+  generative model, assemble context, rerank, interpret options, or produce answers.
+  Native retrieval does use the default local `deterministic-token-v1` feature-hashing
+  provider to create 64-dimensional vectors for its semantic route. This is not a
+  network model call, but it is vectorization through the embedding-provider interface.
 
-This module supports Textual Memory only. Multimodal content arrays, Coding-specific
-payloads, public hosting, TLS termination, network rate limiting, and production secret
-management remain outside this local phase.
+This module supports Textual Memory only. Multimodal content arrays and Coding-specific
+payloads are unsupported. TLS termination, rate limiting, secret files, and container
+controls are supplied by the separate [deployment runbook](AML_DEPLOYMENT_RUNBOOK.md);
+they are not implemented inside the FastAPI application.
+
+The deterministic feature-hashing interpretation remains under AML organizer review.
+No official AML Smoke, Full score, leaderboard rank, or organizer approval is claimed.
 
 ## Evaluation-data deletion
 
-AML evaluation data must be deleted within 30 days after a run. Stop the adapter first,
-then call `cleanup_evaluation_state()` with the exact resolved evaluation root as both
+AML evaluation data must be deleted within 30 days after a run. For an ordinary
+directory-backed state root, stop the adapter first, then call
+`cleanup_evaluation_state()` with the exact resolved evaluation root as both
 the target and explicit confirmation. Cleanup refuses relative paths, symlink roots,
 broad filesystem roots, confirmation mismatches, and roots without the AML ownership
 marker.
+
+For the Docker named volume `aml_aml_state`, do not attempt to remove its mounted root
+from inside a running container. Follow the separately approval-gated exact-volume
+procedure in `deploy/hetzner/PHASE06B_PRODUCTION_READINESS.md`. Never use a broad volume
+prune or delete TLS, bearer-token, configuration, or deployment-source files.
 
 The operation removes the entire marked evaluation tree, including memory, audit and
 learning databases, idempotency records, state/session metadata, artifacts, cache,

@@ -1,7 +1,8 @@
-# SYUNE documentation
+# SYUNE 2.0 documentation
 
-The public v1 contract is the Lean runtime: governed memory, bounded context, reliable
-model execution, and durable audit. This index is the canonical product documentation map.
+SYUNE 2.0.0 is the product release. Public API v1 and MCP v1 remain its stable protocol
+contracts. This index separates current product documentation from preserved historical
+v1 design and validation records.
 
 ## Getting started
 
@@ -14,7 +15,7 @@ model execution, and durable audit. This index is the canonical product document
 
 ## Concepts
 
-- [Lean v1 product boundary](product_refactor/V1_PRODUCT_BOUNDARY.md)
+- [SYUNE v2 architecture](architecture/SYUNE_V2_ARCHITECTURE.md)
 - [Experimental compatibility modules](product_refactor/EXPERIMENTAL_MODULES.md)
 - [Compatibility matrix](COMPATIBILITY_MATRIX.md)
 - [Known limitations](known_limitations.md)
@@ -31,6 +32,7 @@ model execution, and durable audit. This index is the canonical product document
 - [Python SDK](PYTHON_SDK.md)
 - [MCP v1](MCP_V1.md)
 - [Study and ingestion](INGESTION.md)
+- [Textual Memory HTTP adapter](AML_HTTP_ADAPTER.md)
 
 ## Security
 
@@ -41,12 +43,18 @@ model execution, and durable audit. This index is the canonical product document
 
 ## Architecture
 
+- [SYUNE v2 architecture](architecture/SYUNE_V2_ARCHITECTURE.md)
+- [ModelGateway](architecture/MODEL_GATEWAY.md)
+
+### Historical v1 architecture
+
 - [Lean v1 architecture](architecture/LEAN_V1_ARCHITECTURE.md)
 - [Lean v1 API](product_refactor/LEAN_V1_API.md)
-- [ModelGateway](architecture/MODEL_GATEWAY.md)
 
 ## Operations
 
+- [AML deployment runbook](AML_DEPLOYMENT_RUNBOOK.md)
+- [Cloud container validation](AML_CLOUD_CONTAINER_VALIDATION.md)
 - [ModelGateway policy](operations/model-gateway-policy.md)
 - [Observability](operations/observability.md)
 - [Recovery](operations/recovery.md)
@@ -62,10 +70,12 @@ model execution, and durable audit. This index is the canonical product document
 - [Experimental modules](product_refactor/EXPERIMENTAL_MODULES.md)
 
 Research cognition, learning, Council, Planner, and Executive surfaces are disabled by
-default and are outside the stable v1 product contract.
+default and are outside the recommended v2 product path.
 
 ## Release
 
+- [SYUNE v2.0.0 release notes](release/v2.0.0.md)
+- [v2.0.0 changelog](../CHANGELOG.md#200---2026-10-09)
 - [v1.1.0 release notes](release/v1.1.0.md)
 - [v1.0.3 release notes](release/v1.0.3.md)
 - [v1.0.2 release notes](release/v1.0.2.md)

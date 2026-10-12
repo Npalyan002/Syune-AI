@@ -152,7 +152,8 @@ def test_locked_manifest_matches_dependency_files():
     manifest = tomllib.loads((DEPLOY / "deployment-manifest.toml").read_text(encoding="utf-8"))
     for name, key in (("uv.lock", "dependency_lock_sha256"),
                       ("pyproject.toml", "pyproject_sha256")):
-        digest = hashlib.sha256((PROJECT / name).read_bytes()).hexdigest()
+        canonical = (PROJECT / name).read_bytes().replace(b"\r\n", b"\n")
+        digest = hashlib.sha256(canonical).hexdigest()
         assert digest == manifest[key]
     assert manifest["runtime"]["application_processes"] == 1
     assert manifest["proposed_version"] == "2.0.0"

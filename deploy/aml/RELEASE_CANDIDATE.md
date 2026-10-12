@@ -1,5 +1,9 @@
 # SYUNE 2.0.0 release candidate record
 
+> Historical pre-release record. SYUNE v2.0.0 was subsequently released from
+> commit `23d76717feff156849acc5e6b66aac088cd92afb`. This file preserves the
+> candidate-validation trail; it is not the current release declaration.
+
 SYUNE 2.0.0 is the next major-release candidate built from historical baseline
 `fb76ca390d0774a95a522517d129730c3446a312` (`v1.1.0`) plus the validated Phase
 02A through 04B integration, security, reliability, and deployment work. The

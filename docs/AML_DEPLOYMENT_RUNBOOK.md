@@ -1,8 +1,8 @@
 # SYUNE AML Deployment Runbook
 
-This package prepares the SYUNE 2.0.0 Textual Memory adapter for deployment but
-does not deploy it. The historical `v1.1.0` tag remains the immutable baseline.
-The 2.0.0 candidate must be identified by its own exact commit and must never be represented as that historical tag.
+This package describes deployment of the released SYUNE 2.0.0 Textual Memory adapter.
+The immutable release commit is `23d76717feff156849acc5e6b66aac088cd92afb` and the
+tag is `v2.0.0`. Historical v1 tags remain unchanged; the v2 source must never be represented as that historical v1 release.
 
 ## Architecture
 
@@ -33,9 +33,9 @@ application process and use supervisor restart-on-failure behavior.
 2. Put the bearer token and TLS private key in the platform secret manager.
    Materialize them as files readable only by the service identity. Never put
    values in an environment file, image, command line, log, or repository.
-3. Review `deployment-manifest.toml`. Before production, create an approved
-   immutable source revision for these changes. The supplied container references
-   already include Docker Hub OCI-index digests; verify them again at promotion. Record the source revision, image
+3. Review `deployment-manifest.toml` and verify the checkout is the exact v2.0.0
+   commit above. The supplied container references already include Docker Hub
+   OCI-index digests; verify them again before a rebuild. Record the source revision, image
    digests, lock hash, config hash, build timestamp, and operator approval.
 4. Verify `sha256sum uv.lock` equals the manifest. Run `uv sync --frozen
    --no-dev`; do not regenerate the lock during deployment.
@@ -79,7 +79,7 @@ idempotency.
 
 Complete and approve this record before launch:
 
-    Source revision: <immutable SYUNE 2.0.0 candidate revision>
+    Source revision: 23d76717feff156849acc5e6b66aac088cd92afb
     Application base image: python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
     Proxy image: nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284
     Python / uv.lock SHA-256: <versions and hash>
@@ -115,10 +115,11 @@ exports, encrypted snapshots, backups, and any provider copies.
 
 No automatic destructive schedule is installed by this package.
 
-After stopping the service and expiring required recovery copies, run
-`deploy/aml/cleanup_evaluation.py` with both the absolute root and the identical
-resolved `--confirm-root`. The cleanup refuses symlinks, broad paths, and roots
-without the AML ownership marker. Delete external logs, snapshots, backups, and
-provider replicas through their native controls, record evidence and dates,
-then verify the state root and external copies no longer exist. This procedure
-must never target development or personal state.
+For a directory-backed installation, after stopping the service and expiring required
+recovery copies, run `deploy/aml/cleanup_evaluation.py` with both the absolute root and
+the identical resolved `--confirm-root`. For the Compose named volume
+`aml_aml_state`, use the exact-volume, separately approved procedure in
+`deploy/hetzner/PHASE06B_PRODUCTION_READINESS.md`; do not try to delete a mounted volume
+root from inside the application. Delete external logs, snapshots, backups, and provider
+replicas through their native controls, record evidence and dates, then verify the state
+and external copies no longer exist. Never target development or personal state.
