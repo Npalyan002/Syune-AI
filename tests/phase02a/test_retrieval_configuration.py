@@ -101,8 +101,12 @@ def test_ranking_access_isolation_and_restart_are_deterministic(tmp_path):
     with Syune.open(state_root=state, config=config_path) as first_client:
         first = first_client.recall(request)
         first_ranking = ranked_ids(first)
-        assert len(first_ranking) == 93
-        assert [rank for _, rank, _ in first_ranking] == list(range(1, 94))
+        # Seven restricted lexical roots are removed before seed selection and
+        # traversal. Public tails reachable only through those roots are therefore
+        # intentionally absent; retaining the former count of 93 would preserve an
+        # authorization-dependent graph influence channel.
+        assert len(first_ranking) == 82
+        assert [rank for _, rank, _ in first_ranking] == list(range(1, 83))
     with Syune.open(state_root=state, config=config_path) as second_client:
         second_ranking = ranked_ids(second_client.recall(request))
     assert second_ranking == first_ranking

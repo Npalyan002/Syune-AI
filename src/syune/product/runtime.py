@@ -31,6 +31,7 @@ class SyuneRuntime:
     council: object | None = None
     planner: object | None = None
     closed: bool = False
+    owns_shared_services: bool = True
 
     @classmethod
     def open(cls, config: SyuneConfig) -> "SyuneRuntime":
@@ -62,12 +63,39 @@ class SyuneRuntime:
             for item in reversed(opened): item.close()
             raise
 
+    @classmethod
+    def reader(cls, owner: "SyuneRuntime") -> "SyuneRuntime":
+        """Create a read runtime with an independent memory connection.
+
+        The derivative index and audit store are lifecycle-owned by ``owner``.
+        A writer publishes index changes before the adapter admits new readers.
+        """
+        if owner.closed:
+            raise ValueError("cannot create a reader from a closed runtime")
+        memory = SQLiteMemoryRepository(
+            owner.config.state.root / DATABASES["memory"], readonly=True)
+        try:
+            retrieval = RetrievalService(
+                memory, owner.index, owner.retrieval.config,
+                owner.retrieval.materialization_check, owner.retrieval.plasticity,
+            )
+            return cls(
+                owner.config, owner.metadata, memory, owner.study_registry, owner.index,
+                retrieval, ContextService(memory, retrieval, owner.audit),
+                StudyService(owner.study_registry, memory), owner.audit,
+                owns_shared_services=False,
+            )
+        except Exception:
+            memory.close()
+            raise
+
     def close(self) -> None:
         if self.closed: return
-        if self.execution is not None: self.execution.close()
-        if self.learning is not None: self.learning.close()
-        self.audit.close()
-        self.study_registry.close()
+        if self.owns_shared_services:
+            if self.execution is not None: self.execution.close()
+            if self.learning is not None: self.learning.close()
+            self.audit.close()
+            self.study_registry.close()
         self.memory.close()
         self.closed = True
 

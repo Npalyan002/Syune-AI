@@ -87,15 +87,28 @@ def _key(entity_id: object) -> tuple[str, str]:
 class SQLiteMemoryRepository:
     """Single-process SQLite reference store satisfying MemoryRepository."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, readonly: bool = False):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
+        if not readonly:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+        target = f"file:{self.path.as_posix()}?mode=ro" if readonly else self.path
+        self._db = sqlite3.connect(target, uri=readonly, check_same_thread=False, timeout=30)
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.execute("PRAGMA busy_timeout = 30000")
-        self._db.execute("PRAGMA synchronous = FULL")
+        if not readonly:
+            self._db.execute("PRAGMA synchronous = FULL")
         try:
+            if readonly:
+                row = self._db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+                tables = {r[0] for r in self._db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if row is None or row[0] != str(SCHEMA_VERSION):
+                    raise ValueError("incompatible or missing memory schema version")
+                if not {"metadata", "entities", "associations", "change_journal", "lifecycle"}.issubset(tables):
+                    raise ValueError("incomplete memory schema")
+                return
             with self._db:
                 self._db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
                 row = self._db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()

@@ -12,10 +12,64 @@ import json
 from syune.memory.model import NodeId
 
 _TOKEN = re.compile(r"\w+", re.UNICODE)
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do", "does",
+    "for", "from", "give", "has", "have", "how", "in", "into", "is", "it", "name",
+    "of", "on", "the", "to", "upon", "was", "were", "what", "when", "where", "which",
+    "who", "why", "with", "together", "record", "records", "retrieve", "return", "says", "serves",
+})
+_CANONICAL = {
+    "automobile": "vehicle", "car": "vehicle",
+    "biggest": "large", "largest": "large",
+    # Fixed relation equivalence classes. These express equivalence, not general
+    # relatedness: ownership deliberately remains distinct from management.
+    "owned": "owner", "owns": "owner", "proprietor": "owner",
+    "chief": "manage", "coordinate": "manage", "coordinator": "manage",
+    "lead": "manage", "manage": "manage", "manager": "manage",
+    "oversee": "manage", "responsible": "manage", "supervise": "manage",
+    "supervisor": "manage",
+    "bas": "location", "base": "location", "headquarter": "location",
+    "located": "location", "location": "location", "place": "location",
+    "situat": "location",
+    "provid": "supplier", "provide": "supplier", "provider": "supplier", "supplier": "supplier",
+    "supply": "supplier", "vendor": "supplier",
+    "compos": "material", "compose": "material", "composition": "material",
+    "consist": "material", "made": "material", "material": "material",
+    "condition": "status", "phase": "status", "state": "status", "status": "status",
+    "moon": "moon", "moons": "moon", "satellite": "moon", "satellites": "moon",
+    "propulsion": "engine",
+}
 
 
 def tokens(text: str) -> tuple[str, ...]:
     return tuple(match.group().casefold() for match in _TOKEN.finditer(text))
+
+
+def _stem(token: str) -> str:
+    if len(token) > 5 and token.endswith("ing"): token = token[:-3]
+    elif len(token) > 4 and token.endswith("ies"): token = token[:-3] + "y"
+    elif len(token) > 4 and token.endswith("ied"): token = token[:-3] + "y"
+    elif len(token) > 4 and token.endswith("ed"): token = token[:-2]
+    elif len(token) > 5 and token.endswith(("ches", "shes", "sses", "xes", "zes")): token = token[:-2]
+    elif len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is", "as")): token = token[:-1]
+    return token
+
+
+def terms(text: str) -> tuple[str, ...]:
+    """Deterministic non-learned content terms used by lexical retrieval."""
+    normalized = []
+    for token in tokens(text):
+        if token in _STOPWORDS: continue
+        token = _CANONICAL.get(token, token)
+        token = _CANONICAL.get(_stem(token), _stem(token))
+        normalized.append(token)
+    return tuple(normalized)
+
+
+def entity_terms(text: str) -> tuple[str, ...]:
+    """Return normalized terms from explicit capitalized entity mentions."""
+    mentions = " ".join(re.findall(r"\b[A-Z][\w-]*\b", text))
+    return tuple(dict.fromkeys(terms(mentions)))
 
 
 class RetrieverKind(str, Enum):
@@ -162,13 +216,14 @@ class LocalVectorIndex:
 
 
 def analyze_query(text: str | None, has_exact_ids: bool = False) -> QueryAnalysis:
-    query_tokens = tokens(text or "")
+    raw_tokens = tokens(text or "")
+    query_tokens = terms(text or "")
     if has_exact_ids: return QueryAnalysis(QueryIntent.EXACT, query_tokens, (RetrieverKind.EXACT, RetrieverKind.ENTITY), (RetrieverKind.LEXICAL,))
-    if set(query_tokens) & {"current","previous","historical","history","before","after","when"}:
+    if set(raw_tokens) & {"current","previous","historical","history","before","after","when"}:
         return QueryAnalysis(QueryIntent.TEMPORAL, query_tokens, (RetrieverKind.TEMPORAL,RetrieverKind.LEXICAL,RetrieverKind.ENTITY), (RetrieverKind.ASSOCIATIVE,RetrieverKind.SEMANTIC))
-    if set(query_tokens) & {"similar","concept","idea","meaning","related","analogy"}:
+    if set(raw_tokens) & {"similar","concept","idea","meaning","related","analogy"}:
         return QueryAnalysis(QueryIntent.CONCEPTUAL, query_tokens, (RetrieverKind.SEMANTIC,RetrieverKind.ASSOCIATIVE), (RetrieverKind.LEXICAL,))
-    if set(query_tokens) & {"linked","connection","associated","route","relationship"}:
+    if set(raw_tokens) & {"linked","connection","associated","route","relationship"}:
         return QueryAnalysis(QueryIntent.ASSOCIATIVE, query_tokens, (RetrieverKind.LEXICAL,RetrieverKind.ASSOCIATIVE), (RetrieverKind.SEMANTIC,))
     return QueryAnalysis(QueryIntent.MIXED, query_tokens, (RetrieverKind.LEXICAL,RetrieverKind.ENTITY,RetrieverKind.ASSOCIATIVE), (RetrieverKind.SEMANTIC,))
 

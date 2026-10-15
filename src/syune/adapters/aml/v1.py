@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import queue
 import shutil
 import sqlite3
 import tempfile
@@ -23,12 +24,171 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
-from syune import AddMessage, BatchAddRequest, RecallRequest, Syune, SyuneError
+from syune import AddMessage, BatchAddRequest, ErrorCategory, RecallRequest, Syune, SyuneError
 from syune.product.config import load_config
 from syune.product.state import initialize_state
 
 
 _OPERATIONS_LOG = logging.getLogger("syune.aml.operations")
+
+
+def _timing(event: str, started: float, **values: object) -> None:
+    """Emit numeric operational timing without request or identity data."""
+    _OPERATIONS_LOG.info(json.dumps({
+        "event": event,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+        **values,
+    }, separators=(",", ":")))
+
+
+class _ReadWriteLock:
+    """Writer-preferring lock: concurrent searches, serialized mutations."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting_writers = 0
+
+    def acquire_read(self) -> None:
+        with self._condition:
+            while self._writer or self._waiting_writers:
+                self._condition.wait()
+            self._readers += 1
+
+    def release_read(self) -> None:
+        with self._condition:
+            self._readers -= 1
+            if not self._readers:
+                self._condition.notify_all()
+
+    def acquire_write(self) -> None:
+        with self._condition:
+            self._waiting_writers += 1
+            try:
+                while self._writer or self._readers:
+                    self._condition.wait()
+                self._writer = True
+            finally:
+                self._waiting_writers -= 1
+
+    def release_write(self) -> None:
+        with self._condition:
+            self._writer = False
+            self._condition.notify_all()
+
+
+class _PersistentRuntime:
+    """Own exactly one SDK runtime for an application lifecycle."""
+
+    def __init__(self, state_root: Path, reader_count: int):
+        self._state_root = state_root
+        self._reader_count = reader_count
+        self._lock = _ReadWriteLock()
+        self._client: Syune | None = None
+        self._readers: list[Syune] = []
+        self._available: queue.Queue[Syune] = queue.Queue(reader_count)
+        self._closed = False
+        self._open(recovery=False)
+
+    def _open(self, *, recovery: bool) -> None:
+        started = time.perf_counter()
+        for attempt in range(6):
+            try:
+                self._client = Syune.open(state_root=self._state_root)
+                self._readers = []
+                for _ in range(self._reader_count):
+                    self._readers.append(self._client._fork_reader())
+                self._available = queue.Queue(self._reader_count)
+                for reader in self._readers:
+                    self._available.put_nowait(reader)
+                _timing("runtime_initialization", started, recovery=recovery)
+                _timing("index_rebuild", started, recovery=recovery)
+                return
+            except PermissionError:
+                for reader in self._readers:
+                    reader.close()
+                self._readers.clear()
+                if self._client is not None:
+                    self._client.close()
+                    self._client = None
+                if attempt == 5:
+                    raise
+                time.sleep(0.02 * (2 ** attempt))
+
+    def read(self, operation):
+        self._lock.acquire_read()
+        try:
+            if self._closed or self._client is None:
+                raise RuntimeError("AML runtime is closed")
+            reader = self._available.get()
+            try:
+                return operation(reader)
+            finally:
+                self._available.put_nowait(reader)
+        finally:
+            self._lock.release_read()
+
+    def write(self, operation):
+        self._lock.acquire_write()
+        try:
+            if self._closed or self._client is None:
+                raise RuntimeError("AML runtime is closed")
+            try:
+                return operation(self._client)
+            except (ValueError, TypeError):
+                # Request/precondition failures occur before a durable mutation.
+                raise
+            except SyuneError as exc:
+                # Stable business rejections are explicitly pre-commit and leave
+                # the writer, derivative index, and reader snapshots coherent.
+                if exc.code == "IDEMPOTENCY_CONFLICT" or exc.category in {
+                    ErrorCategory.INVALID_REQUEST, ErrorCategory.BLOCKED,
+                    ErrorCategory.CONFLICT, ErrorCategory.LIMIT_EXCEEDED,
+                }:
+                    raise
+                self._recover()
+                raise
+            except Exception:
+                # A durable commit can precede an index-sync failure. Reopening
+                # reconstructs the derivative index before another request enters.
+                self._recover()
+                raise
+        finally:
+            self._lock.release_write()
+
+    def _recover(self) -> None:
+        for reader in self._readers:
+            reader.close()
+        self._readers.clear()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+        self._open(recovery=True)
+
+    def close(self) -> None:
+        self._lock.acquire_write()
+        try:
+            if not self._closed:
+                self._closed = True
+                if self._client is not None:
+                    for reader in self._readers:
+                        reader.close()
+                    self._readers.clear()
+                    self._client.close()
+                    self._client = None
+        finally:
+            self._lock.release_write()
+
+    def cache_metrics(self) -> dict[str, int]:
+        self._lock.acquire_read()
+        try:
+            if self._client is None:
+                return {}
+            native = getattr(self._client, "_Syune__runtime", None)
+            return native.index.partition_metrics() if native is not None else {}
+        finally:
+            self._lock.release_read()
 
 
 class _StrictModel(BaseModel):
@@ -252,28 +412,15 @@ def create_app(settings: AdapterSettings) -> FastAPI:
     state_root = _prepare_state(Path(settings.state_root))
     executor = ThreadPoolExecutor(max_workers=settings.max_concurrency, thread_name_prefix="syune-aml")
     slots = asyncio.Semaphore(settings.max_concurrency)
-    open_lock = threading.Lock()
+    runtime = _PersistentRuntime(state_root, settings.max_concurrency)
 
-    def open_client() -> Syune:
-        # Runtime startup atomically replaces one shared metadata file. Serialize
-        # this short section so Windows and concurrent requests cannot race it.
-        with open_lock:
-            for attempt in range(6):
-                try:
-                    return Syune.open(state_root=state_root)
-                except PermissionError:
-                    # Windows scanners can briefly hold the destination of an
-                    # atomic replace. Runtime.open closes partial resources.
-                    if attempt == 5:
-                        raise
-                    time.sleep(0.02 * (2 ** attempt))
-        raise RuntimeError("unreachable")
     @asynccontextmanager
     async def lifespan(_app):
         try:
             yield
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
+            runtime.close()
     app = FastAPI(title="SYUNE AML Textual Adapter", version="1", docs_url=None,
                   redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
@@ -313,10 +460,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
                                 headers={"WWW-Authenticate": "Bearer"})
 
     async def run_bounded(function):
+        queued = time.perf_counter()
         try:
             await asyncio.wait_for(slots.acquire(), timeout=settings.queue_wait_seconds)
         except TimeoutError:
+            _timing("queue_wait", queued, admitted=False)
             raise HTTPException(503, detail={"reason": "service capacity exhausted"}) from None
+        _timing("queue_wait", queued, admitted=True)
         try:
             return await asyncio.get_running_loop().run_in_executor(executor, function)
         finally:
@@ -344,10 +494,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
             messages = tuple(AddMessage(index, message.content, _unix_ms(message.timestamp),
                                         source_name=f"{payload.session_id}:{message.role}")
                              for index, message in enumerate(payload.messages))
-            with open_client() as client:
+            started = time.perf_counter()
+            def commit(client):
                 client.add_batch(BatchAddRequest(payload.request_id, payload.user_id,
                                                  payload.session_id, messages),
                                  global_request_id=True)
+            runtime.write(commit)
+            _timing("incremental_index_update", started, success=True)
             return {"success": True, "request_id": payload.request_id,
                     "user_id": payload.user_id, "session_id": payload.session_id}
         try:
@@ -362,9 +515,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
     @app.post("/search", response_model=AMLSearchResponse, dependencies=[Depends(authenticated)])
     async def search(payload: AMLSearchRequest):
         def execute():
-            with open_client() as client:
+            def perform(client):
+                recall_started = time.perf_counter()
                 recalled = client.recall(RecallRequest(
                     cue=payload.query, max_results=payload.top_k, user_id=payload.user_id))
+                _timing("candidate_generation_authorization_ranking", recall_started,
+                        candidates=len(recalled.data["candidates"]))
+                assembly_started = time.perf_counter()
                 data = []
                 for candidate in recalled.data["candidates"][:payload.top_k]:
                     typed_id = candidate["entity_id"]
@@ -377,7 +534,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
                     data.append({"id": typed_id, "content": content,
                                  "score": float(candidate["score"]),
                                  "created_at": created_at})
-            return {"data": data}
+                _timing("response_assembly", assembly_started, results=len(data))
+                return {"data": data}
+            result = runtime.read(perform)
+            metrics = runtime.cache_metrics()
+            _OPERATIONS_LOG.info(json.dumps({"event": "policy_partition_cache", **metrics},
+                                             separators=(",", ":")))
+            return result
         try:
             return await run_bounded(execute)
         except SyuneError:

@@ -1,0 +1,3192 @@
+diff --git a/src/syune/adapters/aml/v1.py b/src/syune/adapters/aml/v1.py
+index 65f6458..c274d3a 100644
+--- a/src/syune/adapters/aml/v1.py
++++ b/src/syune/adapters/aml/v1.py
+@@ -6,6 +6,7 @@ import hmac
+ import json
+ import logging
+ import os
++import queue
+ import shutil
+ import sqlite3
+ import tempfile
+@@ -23,7 +24,7 @@ from fastapi.exceptions import RequestValidationError
+ from fastapi.responses import JSONResponse
+ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
+ 
+-from syune import AddMessage, BatchAddRequest, RecallRequest, Syune, SyuneError
++from syune import AddMessage, BatchAddRequest, ErrorCategory, RecallRequest, Syune, SyuneError
+ from syune.product.config import load_config
+ from syune.product.state import initialize_state
+ 
+@@ -31,6 +32,165 @@ from syune.product.state import initialize_state
+ _OPERATIONS_LOG = logging.getLogger("syune.aml.operations")
+ 
+ 
++def _timing(event: str, started: float, **values: object) -> None:
++    """Emit numeric operational timing without request or identity data."""
++    _OPERATIONS_LOG.info(json.dumps({
++        "event": event,
++        "duration_ms": round((time.perf_counter() - started) * 1000, 3),
++        **values,
++    }, separators=(",", ":")))
++
++
++class _ReadWriteLock:
++    """Writer-preferring lock: concurrent searches, serialized mutations."""
++
++    def __init__(self) -> None:
++        self._condition = threading.Condition()
++        self._readers = 0
++        self._writer = False
++        self._waiting_writers = 0
++
++    def acquire_read(self) -> None:
++        with self._condition:
++            while self._writer or self._waiting_writers:
++                self._condition.wait()
++            self._readers += 1
++
++    def release_read(self) -> None:
++        with self._condition:
++            self._readers -= 1
++            if not self._readers:
++                self._condition.notify_all()
++
++    def acquire_write(self) -> None:
++        with self._condition:
++            self._waiting_writers += 1
++            try:
++                while self._writer or self._readers:
++                    self._condition.wait()
++                self._writer = True
++            finally:
++                self._waiting_writers -= 1
++
++    def release_write(self) -> None:
++        with self._condition:
++            self._writer = False
++            self._condition.notify_all()
++
++
++class _PersistentRuntime:
++    """Own exactly one SDK runtime for an application lifecycle."""
++
++    def __init__(self, state_root: Path, reader_count: int):
++        self._state_root = state_root
++        self._reader_count = reader_count
++        self._lock = _ReadWriteLock()
++        self._client: Syune | None = None
++        self._readers: list[Syune] = []
++        self._available: queue.Queue[Syune] = queue.Queue(reader_count)
++        self._closed = False
++        self._open(recovery=False)
++
++    def _open(self, *, recovery: bool) -> None:
++        started = time.perf_counter()
++        for attempt in range(6):
++            try:
++                self._client = Syune.open(state_root=self._state_root)
++                self._readers = []
++                for _ in range(self._reader_count):
++                    self._readers.append(self._client._fork_reader())
++                self._available = queue.Queue(self._reader_count)
++                for reader in self._readers:
++                    self._available.put_nowait(reader)
++                _timing("runtime_initialization", started, recovery=recovery)
++                _timing("index_rebuild", started, recovery=recovery)
++                return
++            except PermissionError:
++                for reader in self._readers:
++                    reader.close()
++                self._readers.clear()
++                if self._client is not None:
++                    self._client.close()
++                    self._client = None
++                if attempt == 5:
++                    raise
++                time.sleep(0.02 * (2 ** attempt))
++
++    def read(self, operation):
++        self._lock.acquire_read()
++        try:
++            if self._closed or self._client is None:
++                raise RuntimeError("AML runtime is closed")
++            reader = self._available.get()
++            try:
++                return operation(reader)
++            finally:
++                self._available.put_nowait(reader)
++        finally:
++            self._lock.release_read()
++
++    def write(self, operation):
++        self._lock.acquire_write()
++        try:
++            if self._closed or self._client is None:
++                raise RuntimeError("AML runtime is closed")
++            try:
++                return operation(self._client)
++            except (ValueError, TypeError):
++                # Request/precondition failures occur before a durable mutation.
++                raise
++            except SyuneError as exc:
++                # Stable business rejections are explicitly pre-commit and leave
++                # the writer, derivative index, and reader snapshots coherent.
++                if exc.code == "IDEMPOTENCY_CONFLICT" or exc.category in {
++                    ErrorCategory.INVALID_REQUEST, ErrorCategory.BLOCKED,
++                    ErrorCategory.CONFLICT, ErrorCategory.LIMIT_EXCEEDED,
++                }:
++                    raise
++                self._recover()
++                raise
++            except Exception:
++                # A durable commit can precede an index-sync failure. Reopening
++                # reconstructs the derivative index before another request enters.
++                self._recover()
++                raise
++        finally:
++            self._lock.release_write()
++
++    def _recover(self) -> None:
++        for reader in self._readers:
++            reader.close()
++        self._readers.clear()
++        if self._client is not None:
++            self._client.close()
++            self._client = None
++        self._open(recovery=True)
++
++    def close(self) -> None:
++        self._lock.acquire_write()
++        try:
++            if not self._closed:
++                self._closed = True
++                if self._client is not None:
++                    for reader in self._readers:
++                        reader.close()
++                    self._readers.clear()
++                    self._client.close()
++                    self._client = None
++        finally:
++            self._lock.release_write()
++
++    def cache_metrics(self) -> dict[str, int]:
++        self._lock.acquire_read()
++        try:
++            if self._client is None:
++                return {}
++            native = getattr(self._client, "_Syune__runtime", None)
++            return native.index.partition_metrics() if native is not None else {}
++        finally:
++            self._lock.release_read()
++
++
+ class _StrictModel(BaseModel):
+     model_config = ConfigDict(extra="forbid", strict=True)
+ 
+@@ -252,28 +412,15 @@ def create_app(settings: AdapterSettings) -> FastAPI:
+     state_root = _prepare_state(Path(settings.state_root))
+     executor = ThreadPoolExecutor(max_workers=settings.max_concurrency, thread_name_prefix="syune-aml")
+     slots = asyncio.Semaphore(settings.max_concurrency)
+-    open_lock = threading.Lock()
+-
+-    def open_client() -> Syune:
+-        # Runtime startup atomically replaces one shared metadata file. Serialize
+-        # this short section so Windows and concurrent requests cannot race it.
+-        with open_lock:
+-            for attempt in range(6):
+-                try:
+-                    return Syune.open(state_root=state_root)
+-                except PermissionError:
+-                    # Windows scanners can briefly hold the destination of an
+-                    # atomic replace. Runtime.open closes partial resources.
+-                    if attempt == 5:
+-                        raise
+-                    time.sleep(0.02 * (2 ** attempt))
+-        raise RuntimeError("unreachable")
++    runtime = _PersistentRuntime(state_root, settings.max_concurrency)
++
+     @asynccontextmanager
+     async def lifespan(_app):
+         try:
+             yield
+         finally:
+             executor.shutdown(wait=True, cancel_futures=True)
++            runtime.close()
+     app = FastAPI(title="SYUNE AML Textual Adapter", version="1", docs_url=None,
+                   redoc_url=None, openapi_url=None, lifespan=lifespan)
+     app.add_middleware(BodyLimitMiddleware, max_bytes=settings.max_body_bytes)
+@@ -313,10 +460,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
+                                 headers={"WWW-Authenticate": "Bearer"})
+ 
+     async def run_bounded(function):
++        queued = time.perf_counter()
+         try:
+             await asyncio.wait_for(slots.acquire(), timeout=settings.queue_wait_seconds)
+         except TimeoutError:
++            _timing("queue_wait", queued, admitted=False)
+             raise HTTPException(503, detail={"reason": "service capacity exhausted"}) from None
++        _timing("queue_wait", queued, admitted=True)
+         try:
+             return await asyncio.get_running_loop().run_in_executor(executor, function)
+         finally:
+@@ -344,10 +494,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
+             messages = tuple(AddMessage(index, message.content, _unix_ms(message.timestamp),
+                                         source_name=f"{payload.session_id}:{message.role}")
+                              for index, message in enumerate(payload.messages))
+-            with open_client() as client:
++            started = time.perf_counter()
++            def commit(client):
+                 client.add_batch(BatchAddRequest(payload.request_id, payload.user_id,
+                                                  payload.session_id, messages),
+                                  global_request_id=True)
++            runtime.write(commit)
++            _timing("incremental_index_update", started, success=True)
+             return {"success": True, "request_id": payload.request_id,
+                     "user_id": payload.user_id, "session_id": payload.session_id}
+         try:
+@@ -362,9 +515,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
+     @app.post("/search", response_model=AMLSearchResponse, dependencies=[Depends(authenticated)])
+     async def search(payload: AMLSearchRequest):
+         def execute():
+-            with open_client() as client:
++            def perform(client):
++                recall_started = time.perf_counter()
+                 recalled = client.recall(RecallRequest(
+                     cue=payload.query, max_results=payload.top_k, user_id=payload.user_id))
++                _timing("candidate_generation_authorization_ranking", recall_started,
++                        candidates=len(recalled.data["candidates"]))
++                assembly_started = time.perf_counter()
+                 data = []
+                 for candidate in recalled.data["candidates"][:payload.top_k]:
+                     typed_id = candidate["entity_id"]
+@@ -377,7 +534,13 @@ def create_app(settings: AdapterSettings) -> FastAPI:
+                     data.append({"id": typed_id, "content": content,
+                                  "score": float(candidate["score"]),
+                                  "created_at": created_at})
+-            return {"data": data}
++                _timing("response_assembly", assembly_started, results=len(data))
++                return {"data": data}
++            result = runtime.read(perform)
++            metrics = runtime.cache_metrics()
++            _OPERATIONS_LOG.info(json.dumps({"event": "policy_partition_cache", **metrics},
++                                             separators=(",", ":")))
++            return result
+         try:
+             return await run_bounded(execute)
+         except SyuneError:
+diff --git a/src/syune/audit/store.py b/src/syune/audit/store.py
+index 3a43adc..d4e132f 100644
+--- a/src/syune/audit/store.py
++++ b/src/syune/audit/store.py
+@@ -6,6 +6,7 @@ from enum import Enum
+ import json
+ from pathlib import Path
+ import sqlite3
++import threading
+ from typing import Any, Mapping
+ 
+ _SECRET_KEYS = frozenset({"authorization", "api_key", "apikey", "credential", "secret",
+@@ -46,8 +47,9 @@ class SQLiteAuditStore:
+     def __init__(self, path: Path):
+         path.parent.mkdir(parents=True, exist_ok=True)
+         self.path = path; self.db = sqlite3.connect(path, check_same_thread=False)
++        self._lock = threading.RLock()
+         self.db.row_factory = sqlite3.Row
+-        with self.db:
++        with self._lock, self.db:
+             self.db.executescript("""
+                 PRAGMA journal_mode=WAL;
+                 CREATE TABLE IF NOT EXISTS audit_events(
+@@ -86,7 +88,7 @@ class SQLiteAuditStore:
+                   json.dumps(_safe(authorization_decisions)), json.dumps(_safe(resource_ids)),
+                   json.dumps(_safe(context_ids)), lifecycle_action, logical_call_id,
+                   json.dumps(_safe(detail or {}), sort_keys=True))
+-        with self.db:
++        with self._lock, self.db:
+             cursor = self.db.execute("INSERT INTO audit_events(operation_id,timestamp,operation_type,outcome,correlation_id,principal_json,purpose,scopes_json,authorization_json,resource_ids_json,context_ids_json,lifecycle_action,logical_call_id,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+         return int(cursor.lastrowid)
+ 
+@@ -99,13 +101,15 @@ class SQLiteAuditStore:
+             if value is not None: where.append(f"{column}=?"); args.append(value)
+         sql = "SELECT * FROM audit_events" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY sequence DESC LIMIT ?"
+         args.append(limit)
+-        rows = self.db.execute(sql, args).fetchall()
++        with self._lock:
++            rows = self.db.execute(sql, args).fetchall()
+         return tuple(AuditEvent(row["sequence"], row["operation_id"], row["timestamp"],
+             row["operation_type"], row["outcome"], row["correlation_id"], json.loads(row["principal_json"]),
+             row["purpose"], json.loads(row["scopes_json"]), tuple(json.loads(row["authorization_json"])),
+             tuple(json.loads(row["resource_ids_json"])), tuple(json.loads(row["context_ids_json"])),
+             row["lifecycle_action"], row["logical_call_id"], json.loads(row["detail_json"])) for row in rows)
+ 
+-    def close(self) -> None: self.db.close()
++    def close(self) -> None:
++        with self._lock: self.db.close()
+     def __enter__(self): return self
+     def __exit__(self, *_): self.close()
+diff --git a/src/syune/memory/sqlite_repository.py b/src/syune/memory/sqlite_repository.py
+index 377bb40..8328e2d 100644
+--- a/src/syune/memory/sqlite_repository.py
++++ b/src/syune/memory/sqlite_repository.py
+@@ -87,15 +87,28 @@ def _key(entity_id: object) -> tuple[str, str]:
+ class SQLiteMemoryRepository:
+     """Single-process SQLite reference store satisfying MemoryRepository."""
+ 
+-    def __init__(self, path: str | Path):
++    def __init__(self, path: str | Path, *, readonly: bool = False):
+         self.path = Path(path)
+-        self.path.parent.mkdir(parents=True, exist_ok=True)
++        self.readonly = readonly
++        if not readonly:
++            self.path.parent.mkdir(parents=True, exist_ok=True)
+         self._lock = threading.RLock()
+-        self._db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
++        target = f"file:{self.path.as_posix()}?mode=ro" if readonly else self.path
++        self._db = sqlite3.connect(target, uri=readonly, check_same_thread=False, timeout=30)
+         self._db.execute("PRAGMA foreign_keys = ON")
+         self._db.execute("PRAGMA busy_timeout = 30000")
+-        self._db.execute("PRAGMA synchronous = FULL")
++        if not readonly:
++            self._db.execute("PRAGMA synchronous = FULL")
+         try:
++            if readonly:
++                row = self._db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
++                tables = {r[0] for r in self._db.execute(
++                    "SELECT name FROM sqlite_master WHERE type='table'")}
++                if row is None or row[0] != str(SCHEMA_VERSION):
++                    raise ValueError("incompatible or missing memory schema version")
++                if not {"metadata", "entities", "associations", "change_journal", "lifecycle"}.issubset(tables):
++                    raise ValueError("incomplete memory schema")
++                return
+             with self._db:
+                 self._db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                 row = self._db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+diff --git a/src/syune/product/runtime.py b/src/syune/product/runtime.py
+index ade35a0..0cc99c2 100644
+--- a/src/syune/product/runtime.py
++++ b/src/syune/product/runtime.py
+@@ -31,6 +31,7 @@ class SyuneRuntime:
+     council: object | None = None
+     planner: object | None = None
+     closed: bool = False
++    owns_shared_services: bool = True
+ 
+     @classmethod
+     def open(cls, config: SyuneConfig) -> "SyuneRuntime":
+@@ -62,12 +63,39 @@ class SyuneRuntime:
+             for item in reversed(opened): item.close()
+             raise
+ 
++    @classmethod
++    def reader(cls, owner: "SyuneRuntime") -> "SyuneRuntime":
++        """Create a read runtime with an independent memory connection.
++
++        The derivative index and audit store are lifecycle-owned by ``owner``.
++        A writer publishes index changes before the adapter admits new readers.
++        """
++        if owner.closed:
++            raise ValueError("cannot create a reader from a closed runtime")
++        memory = SQLiteMemoryRepository(
++            owner.config.state.root / DATABASES["memory"], readonly=True)
++        try:
++            retrieval = RetrievalService(
++                memory, owner.index, owner.retrieval.config,
++                owner.retrieval.materialization_check, owner.retrieval.plasticity,
++            )
++            return cls(
++                owner.config, owner.metadata, memory, owner.study_registry, owner.index,
++                retrieval, ContextService(memory, retrieval, owner.audit),
++                StudyService(owner.study_registry, memory), owner.audit,
++                owns_shared_services=False,
++            )
++        except Exception:
++            memory.close()
++            raise
++
+     def close(self) -> None:
+         if self.closed: return
+-        if self.execution is not None: self.execution.close()
+-        if self.learning is not None: self.learning.close()
+-        self.audit.close()
+-        self.study_registry.close()
++        if self.owns_shared_services:
++            if self.execution is not None: self.execution.close()
++            if self.learning is not None: self.learning.close()
++            self.audit.close()
++            self.study_registry.close()
+         self.memory.close()
+         self.closed = True
+ 
+diff --git a/src/syune/retrieval/hybrid.py b/src/syune/retrieval/hybrid.py
+index 8eba989..9c5eae6 100644
+--- a/src/syune/retrieval/hybrid.py
++++ b/src/syune/retrieval/hybrid.py
+@@ -12,12 +12,66 @@ import json
+ from syune.memory.model import NodeId
+ 
+ _TOKEN = re.compile(r"\w+", re.UNICODE)
++_STOPWORDS = frozenset({
++    "a", "an", "and", "are", "as", "at", "be", "by", "can", "did", "do", "does",
++    "for", "from", "give", "has", "have", "how", "in", "into", "is", "it", "name",
++    "of", "on", "the", "to", "upon", "was", "were", "what", "when", "where", "which",
++    "who", "why", "with", "together", "record", "records", "retrieve", "return", "says", "serves",
++})
++_CANONICAL = {
++    "automobile": "vehicle", "car": "vehicle",
++    "biggest": "large", "largest": "large",
++    # Fixed relation equivalence classes. These express equivalence, not general
++    # relatedness: ownership deliberately remains distinct from management.
++    "owned": "owner", "owns": "owner", "proprietor": "owner",
++    "chief": "manage", "coordinate": "manage", "coordinator": "manage",
++    "lead": "manage", "manage": "manage", "manager": "manage",
++    "oversee": "manage", "responsible": "manage", "supervise": "manage",
++    "supervisor": "manage",
++    "bas": "location", "base": "location", "headquarter": "location",
++    "located": "location", "location": "location", "place": "location",
++    "situat": "location",
++    "provid": "supplier", "provide": "supplier", "provider": "supplier", "supplier": "supplier",
++    "supply": "supplier", "vendor": "supplier",
++    "compos": "material", "compose": "material", "composition": "material",
++    "consist": "material", "made": "material", "material": "material",
++    "condition": "status", "phase": "status", "state": "status", "status": "status",
++    "moon": "moon", "moons": "moon", "satellite": "moon", "satellites": "moon",
++    "propulsion": "engine",
++}
+ 
+ 
+ def tokens(text: str) -> tuple[str, ...]:
+     return tuple(match.group().casefold() for match in _TOKEN.finditer(text))
+ 
+ 
++def _stem(token: str) -> str:
++    if len(token) > 5 and token.endswith("ing"): token = token[:-3]
++    elif len(token) > 4 and token.endswith("ies"): token = token[:-3] + "y"
++    elif len(token) > 4 and token.endswith("ied"): token = token[:-3] + "y"
++    elif len(token) > 4 and token.endswith("ed"): token = token[:-2]
++    elif len(token) > 5 and token.endswith(("ches", "shes", "sses", "xes", "zes")): token = token[:-2]
++    elif len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is", "as")): token = token[:-1]
++    return token
++
++
++def terms(text: str) -> tuple[str, ...]:
++    """Deterministic non-learned content terms used by lexical retrieval."""
++    normalized = []
++    for token in tokens(text):
++        if token in _STOPWORDS: continue
++        token = _CANONICAL.get(token, token)
++        token = _CANONICAL.get(_stem(token), _stem(token))
++        normalized.append(token)
++    return tuple(normalized)
++
++
++def entity_terms(text: str) -> tuple[str, ...]:
++    """Return normalized terms from explicit capitalized entity mentions."""
++    mentions = " ".join(re.findall(r"\b[A-Z][\w-]*\b", text))
++    return tuple(dict.fromkeys(terms(mentions)))
++
++
+ class RetrieverKind(str, Enum):
+     EXACT = "exact"
+     ENTITY = "entity"
+@@ -162,13 +216,14 @@ class LocalVectorIndex:
+ 
+ 
+ def analyze_query(text: str | None, has_exact_ids: bool = False) -> QueryAnalysis:
+-    query_tokens = tokens(text or "")
++    raw_tokens = tokens(text or "")
++    query_tokens = terms(text or "")
+     if has_exact_ids: return QueryAnalysis(QueryIntent.EXACT, query_tokens, (RetrieverKind.EXACT, RetrieverKind.ENTITY), (RetrieverKind.LEXICAL,))
+-    if set(query_tokens) & {"current","previous","historical","history","before","after","when"}:
++    if set(raw_tokens) & {"current","previous","historical","history","before","after","when"}:
+         return QueryAnalysis(QueryIntent.TEMPORAL, query_tokens, (RetrieverKind.TEMPORAL,RetrieverKind.LEXICAL,RetrieverKind.ENTITY), (RetrieverKind.ASSOCIATIVE,RetrieverKind.SEMANTIC))
+-    if set(query_tokens) & {"similar","concept","idea","meaning","related","analogy"}:
++    if set(raw_tokens) & {"similar","concept","idea","meaning","related","analogy"}:
+         return QueryAnalysis(QueryIntent.CONCEPTUAL, query_tokens, (RetrieverKind.SEMANTIC,RetrieverKind.ASSOCIATIVE), (RetrieverKind.LEXICAL,))
+-    if set(query_tokens) & {"linked","connection","associated","route","relationship"}:
++    if set(raw_tokens) & {"linked","connection","associated","route","relationship"}:
+         return QueryAnalysis(QueryIntent.ASSOCIATIVE, query_tokens, (RetrieverKind.LEXICAL,RetrieverKind.ASSOCIATIVE), (RetrieverKind.SEMANTIC,))
+     return QueryAnalysis(QueryIntent.MIXED, query_tokens, (RetrieverKind.LEXICAL,RetrieverKind.ENTITY,RetrieverKind.ASSOCIATIVE), (RetrieverKind.SEMANTIC,))
+ 
+diff --git a/src/syune/retrieval/index.py b/src/syune/retrieval/index.py
+index 6bcac0c..d7d4e78 100644
+--- a/src/syune/retrieval/index.py
++++ b/src/syune/retrieval/index.py
+@@ -10,20 +10,23 @@ from threading import RLock
+ from dataclasses import dataclass
+ from enum import Enum
+ from time import perf_counter
+-from typing import Protocol
++from typing import Callable, Protocol
+ 
+ from syune.core import SourceId
+-from syune.memory import Claim, Concept, Episode, Observation, Procedure
+-from syune.memory import LifecycleState
++from syune.memory import (
++    AccessContext, Claim, Concept, Episode, LifecycleState, Observation, Procedure,
++    SecurityEnvelope, TruthMetadata, authorize, temporally_eligible,
++)
+ from syune.memory.model import NodeId
+ from syune.memory.repository import MemoryRepository
+ from .model import RetrievalError, RetrievalErrorCode
+ from .hybrid import (
+     BackendHealth, DeterministicEmbeddingProvider, EmbeddingProvider, EmbeddingSpaceMismatch,
+     EmbeddingUnavailable, LocalVectorIndex, VectorIndex, VectorIndexUnavailable,
++    entity_terms, terms,
+ )
+ 
+-INDEX_VERSION = "1"
++INDEX_VERSION = "2"
+ _TOKEN = re.compile(r"\w+", re.UNICODE)
+ 
+ def _locked(method):
+@@ -44,6 +47,10 @@ class IndexEntry:
+     field: str
+     text: str
+     source_id: SourceId | None
++    lexical_terms: tuple[str, ...]
++    security: SecurityEnvelope | None
++    truth: TruthMetadata | None
++    provenance_valid: bool
+     version: str = INDEX_VERSION
+ 
+ 
+@@ -76,13 +83,21 @@ class RetrievalIndexMetrics:
+     sync_latency_ms: float
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class PolicyPartition:
++    generation: int
++    entity_ids: frozenset[NodeId]
++    document_tokens: int
++    document_frequency: dict[str, int]
++
++
+ class SeedIndex(Protocol):
+     version: str
+     def rebuild(self) -> None: ...
+     def sync(self) -> None: ...
+     def clear(self) -> None: ...
+-    def lexical(self, text: str, limit: int) -> tuple[LexicalHit, ...]: ...
+-    def source_ids(self, source_id: SourceId, limit: int) -> tuple[NodeId, ...]: ...
++    def lexical(self, text: str, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[LexicalHit, ...]: ...
++    def source_ids(self, source_id: SourceId, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[NodeId, ...]: ...
+ 
+ 
+ class InvertedSeedIndex:
+@@ -105,6 +120,10 @@ class InvertedSeedIndex:
+         self.lifecycle_cursor = 0
+         self.max_lexical_candidates = 2048
+         self.generated_candidates = self.ranked_candidates = 0
++        self.generation = 0
++        self.partition_cache_hits = self.partition_cache_misses = 0
++        self.partition_cache_invalidations = 0
++        self._policy_partitions: dict[AccessContext | None, PolicyPartition] = {}
+         self._total_document_tokens = 0
+         self._truth_groups: dict[tuple[str, str | None], set[NodeId]] = {}
+         self._superseded: set[NodeId] = set()
+@@ -131,6 +150,13 @@ class InvertedSeedIndex:
+         self.consistency = IndexConsistency.LAGGING
+         self.cursor = 0; self.lifecycle_cursor = 0; self._total_document_tokens = 0
+         self._truth_groups.clear(); self._superseded.clear()
++        self._publish_generation()
++
++    def _publish_generation(self) -> None:
++        self.generation += 1
++        if self._policy_partitions:
++            self.partition_cache_invalidations += len(self._policy_partitions)
++            self._policy_partitions.clear()
+ 
+     @_locked
+     def rebuild(self) -> None:
+@@ -173,20 +199,26 @@ class InvertedSeedIndex:
+                 continue
+             prior = self.entries.get(entity.id)
+             if prior is not None:
+-                for token in set(tokens(prior.text)):
++                for token in set(prior.lexical_terms):
+                     posting = self.postings.get(token)
+                     if posting: posting.pop(entity.id, None)
+-                self._total_document_tokens -= len(tokens(prior.text))
++                self._total_document_tokens -= len(prior.lexical_terms)
+                 self.vector_index.remove(entity.id)
+             provenance = getattr(entity, "provenance", None)
+-            entry = IndexEntry(entity.id, type(entity).__name__, field, text,
+-                               provenance.source_id if provenance else None)
++            truth = getattr(entity, "truth", None)
++            provenance_valid = (provenance is None or self.memory.exists(provenance.source_id)
++                                or truth is None or truth.recorded_at is None)
++            entry = IndexEntry(
++                entity.id, type(entity).__name__, field, text,
++                provenance.source_id if provenance else None, terms(text),
++                getattr(entity, "security", None), truth, provenance_valid,
++            )
+             pending.append((entry, text))
+         # Lexical indexing remains operational if semantic infrastructure fails.
+         for entry, text in pending:
+             self.entries[entry.entity_id] = entry
+-            self._total_document_tokens += len(tokens(text))
+-            for token in set(tokens(text)):
++            self._total_document_tokens += len(entry.lexical_terms)
++            for token in set(entry.lexical_terms):
+                 self.postings.setdefault(token, {})[entry.entity_id] = None
+             entity = self.memory.get(entry.entity_id)
+             truth = getattr(entity, "truth", None)
+@@ -209,41 +241,58 @@ class InvertedSeedIndex:
+         if self.consistency is not IndexConsistency.DEGRADED:
+             self.consistency = IndexConsistency.SYNCED
+         self.sync_latency_ms = (perf_counter() - started) * 1000
++        # Writers call sync before releasing the runtime write lock. Publishing a
++        # generation here atomically invalidates policy, ownership, Add, lifecycle,
++        # temporal-metadata, association, and rebuild-derived partitions. Even a
++        # metadata-only/association write therefore cannot retain a stale view.
++        self._publish_generation()
+ 
+     def _remove(self,entity_id):
+         prior=self.entries.pop(entity_id,None)
+         if prior is None:return
+-        for token in set(tokens(prior.text)):
++        for token in set(prior.lexical_terms):
+             posting=self.postings.get(token)
+             if posting: posting.pop(entity_id,None)
+-        self._total_document_tokens-=len(tokens(prior.text)); self.vector_index.remove(entity_id)
++        self._total_document_tokens-=len(prior.lexical_terms); self.vector_index.remove(entity_id)
+         for group in self._truth_groups.values(): group.discard(entity_id)
+ 
+     @_locked
+-    def lexical(self, text: str, limit: int) -> tuple[LexicalHit, ...]:
++    def lexical(self, text: str, limit: int, *, eligible: Callable[[NodeId], bool] | None = None,
++                partition: PolicyPartition | None = None) -> tuple[LexicalHit, ...]:
+         self._check()
+-        query = tuple(dict.fromkeys(tokens(text)))
++        query = tuple(dict.fromkeys(terms(text)))
+         if not query:
+             return ()
+-        planned = sorted(query, key=lambda token: (len(self.postings.get(token, ())), token))
++        allowed_ids = {entity_id for entity_id in self.entries if eligible is None or eligible(entity_id)}
++        cached_stats = (partition is not None and partition.generation == self.generation
++                        and allowed_ids == partition.entity_ids)
++        allowed_frequency = ({token: partition.document_frequency.get(token, 0) for token in query}
++                             if cached_stats else {
++                                 token: sum(entity_id in allowed_ids for entity_id in self.postings.get(token, ()))
++                                 for token in query
++                             })
++        planned = sorted(query, key=lambda token: (
++            allowed_frequency[token], token))
+         ids: set[NodeId] = set()
+         for token in planned:
+             remaining = self.max_lexical_candidates - len(ids)
+             if remaining <= 0: break
+-            posting = self.postings.get(token, {})
++            posting = (entity_id for entity_id in self.postings.get(token, {}) if entity_id in allowed_ids)
+             ids.update(islice(posting, remaining))
+         self.generated_candidates = len(ids)
+         hits = []
+-        document_count = max(1, len(self.entries))
+-        average_length = self._total_document_tokens / document_count
++        document_count = max(1, len(allowed_ids))
++        allowed_document_tokens = (partition.document_tokens if cached_stats else
++                                   sum(len(self.entries[entity_id].lexical_terms) for entity_id in allowed_ids))
++        average_length = allowed_document_tokens / document_count
+         for entity_id in ids:
+             entry = self.entries[entity_id]
+-            matched = tuple(token for token in query if token in tokens(entry.text))
+-            document_tokens = tokens(entry.text)
++            matched = tuple(token for token in query if token in entry.lexical_terms)
++            document_tokens = entry.lexical_terms
+             bm25 = 0.0
+             for token in matched:
+                 frequency = document_tokens.count(token)
+-                document_frequency = len(self.postings.get(token, ()))
++                document_frequency = allowed_frequency[token]
+                 inverse = log(1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
+                 denominator = frequency + 1.2 * (1 - 0.75 + 0.75 * len(document_tokens) / max(1, average_length))
+                 bm25 += inverse * frequency * 2.2 / denominator
+@@ -255,28 +304,39 @@ class InvertedSeedIndex:
+         return tuple(heapq.nsmallest(limit, hits, key=lambda hit: (-hit.score, type(hit.entity_id).__name__, str(hit.entity_id))))
+ 
+     @_locked
+-    def exact(self, text: str, limit: int) -> tuple[LexicalHit, ...]:
++    def exact(self, text: str, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[LexicalHit, ...]:
+         self._check(); needle = text.strip().casefold()
+         hits = [LexicalHit(entry.entity_id, 1.0, entry.field, tokens(text))
+-                for entry in self.entries.values() if entry.text.strip().casefold() == needle]
++                for entry in self.entries.values()
++                if entry.text.strip().casefold() == needle and (eligible is None or eligible(entry.entity_id))]
+         return tuple(sorted(hits, key=lambda hit: (type(hit.entity_id).__name__, str(hit.entity_id)))[:limit])
+ 
+     @_locked
+-    def entity(self, text: str, limit: int) -> tuple[LexicalHit, ...]:
++    def entity(self, text: str, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[LexicalHit, ...]:
+         self._check()
+-        names = tuple(token.casefold() for token in re.findall(r"\b[A-Z][\w-]*\b", text))
++        names = entity_terms(text)
+         if not names: return ()
+-        ids = set().union(*(self.postings.get(name, set()) for name in names))
+-        return tuple(LexicalHit(entity_id, 1.0, "entity", names) for entity_id in
+-                     sorted(ids, key=lambda item: (type(item).__name__, str(item)))[:limit])
++        ids = {entity_id for name in names for entity_id in self.postings.get(name, set())
++               if eligible is None or eligible(entity_id)}
++        hits = []
++        for entity_id in sorted(ids, key=lambda item: (type(item).__name__, str(item))):
++            matched = tuple(name for name in names if name in self.entries[entity_id].lexical_terms)
++            hits.append(LexicalHit(entity_id, len(matched) / len(names), "entity", matched))
++        return tuple(sorted(hits, key=lambda hit: (-hit.score, type(hit.entity_id).__name__,
++                                                   str(hit.entity_id)))[:limit])
+ 
+     @_locked
+-    def semantic(self, text: str, limit: int) -> tuple[LexicalHit, ...]:
++    def semantic(self, text: str, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[LexicalHit, ...]:
+         self._check()
+         try:
+             vector = self.embedding_provider.embed((text,))[0]
++            # Search the complete derivative index before applying the request policy.
++            # Filtering a limited ANN page afterwards lets hidden vectors crowd visible
++            # results out and makes their presence observable through fallback behavior.
++            searched = self.vector_index.search(vector, len(self.entries) if eligible is not None else limit)
+             return tuple(LexicalHit(entity_id, max(0.0, min(1.0, score)), "semantic", ())
+-                         for entity_id, score in self.vector_index.search(vector, limit) if score > 0)
++                         for entity_id, score in searched
++                         if score > 0 and (eligible is None or eligible(entity_id)))[:limit]
+         except (EmbeddingUnavailable, VectorIndexUnavailable):
+             self.fallback_count += 1; self.consistency = IndexConsistency.DEGRADED
+             return ()
+@@ -298,10 +358,74 @@ class InvertedSeedIndex:
+     def is_superseded(self, entity_id: NodeId) -> bool:
+         return entity_id in self._superseded
+ 
++    def request_eligible(self, entity_id: NodeId, access_context: AccessContext | None, *,
++                         valid_at, knowledge_at, current: bool,
++                         partition: PolicyPartition | None = None) -> bool:
++        """Evaluate discovery eligibility from the synchronized immutable snapshot.
++
++        This is only the pre-limit candidate filter. RetrievalService rechecks the
++        authoritative repository before traversal and return.
++        """
++        entry = self.entries.get(entity_id)
++        if entry is None or not entry.provenance_valid:
++            return False
++        if partition is not None:
++            if partition.generation != self.generation or entity_id not in partition.entity_ids:
++                return False
++        elif not authorize(entry.security, access_context).allowed:
++            return False
++        return entry.truth is None or temporally_eligible(
++            entry.truth, valid_at=valid_at, knowledge_at=knowledge_at, current=current,
++            superseded_by_other=entity_id in self._superseded,
++        )
++
++    @_locked
++    def policy_partition(self, access_context: AccessContext | None) -> PolicyPartition:
++        cached = self._policy_partitions.get(access_context)
++        if cached is not None and cached.generation == self.generation:
++            self.partition_cache_hits += 1
++            return cached
++        self.partition_cache_misses += 1
++        allowed = frozenset(
++            entity_id for entity_id, entry in self.entries.items()
++            if entry.provenance_valid and authorize(entry.security, access_context).allowed
++        )
++        frequency: dict[str, int] = {}
++        total = 0
++        for entity_id in allowed:
++            entry = self.entries[entity_id]
++            total += len(entry.lexical_terms)
++            for token in set(entry.lexical_terms):
++                frequency[token] = frequency.get(token, 0) + 1
++        candidate = PolicyPartition(self.generation, allowed, total, frequency)
++        # The index lock makes validation plus publication atomic. If generation ever
++        # differs, fail closed by returning an unpublished empty partition.
++        if candidate.generation != self.generation:
++            return PolicyPartition(self.generation, frozenset(), 0, {})
++        self._policy_partitions[access_context] = candidate
++        return candidate
++
++    def partition_metrics(self) -> dict[str, int]:
++        return {"generation": self.generation, "entries": len(self._policy_partitions),
++                "hits": self.partition_cache_hits, "misses": self.partition_cache_misses,
++                "invalidations": self.partition_cache_invalidations}
++
++    @_locked
++    def denied_lexical_ids(self, text: str, access_context: AccessContext | None,
++                           limit: int) -> tuple[NodeId, ...]:
++        """Bounded audit-only matches; never used for admission, scoring, or routing."""
++        self._check()
++        query = tuple(dict.fromkeys(terms(text)))
++        ids = {entity_id for token in query for entity_id in self.postings.get(token, ())}
++        denied = (entity_id for entity_id in sorted(ids, key=lambda item: (type(item).__name__, str(item)))
++                  if not authorize(self.entries[entity_id].security, access_context).allowed)
++        return tuple(islice(denied, limit))
++
+     def truth_peers(self, fact_key: str, context_key: str | None) -> tuple[NodeId, ...]:
+         return tuple(self._truth_groups.get((fact_key, context_key), ()))
+ 
+-    def source_ids(self, source_id: SourceId, limit: int) -> tuple[NodeId, ...]:
++    def source_ids(self, source_id: SourceId, limit: int, *, eligible: Callable[[NodeId], bool] | None = None) -> tuple[NodeId, ...]:
+         self._check()
+-        ids = (entry.entity_id for entry in self.entries.values() if entry.source_id == source_id)
++        ids = (entry.entity_id for entry in self.entries.values()
++               if entry.source_id == source_id and (eligible is None or eligible(entry.entity_id)))
+         return tuple(sorted(ids, key=lambda entity_id: (type(entity_id).__name__, str(entity_id)))[:limit])
+diff --git a/src/syune/retrieval/service.py b/src/syune/retrieval/service.py
+index ba632b6..3259251 100644
+--- a/src/syune/retrieval/service.py
++++ b/src/syune/retrieval/service.py
+@@ -16,7 +16,7 @@ from syune.memory import (
+ from syune.memory.model import NodeId
+ from syune.memory.repository import MemoryObject, MemoryRepository
+ from .index import SeedIndex
+-from .hybrid import RetrieverKind, analyze_query, reciprocal_rank_fusion
++from .hybrid import RetrieverKind, analyze_query, entity_terms, reciprocal_rank_fusion
+ from .model import (
+     NullPlasticityView, PlasticityView, RecallCandidate, RecallRequest, RecallResult, RetrievalConfig,
+     RetrievalError, RetrievalErrorCode,
+@@ -52,59 +52,170 @@ class RetrievalService:
+         cue = request.cue
+         analysis = analyze_query(cue.text, bool(cue.entity_ids or cue.source_ids or cue.context_ids))
+         found_by: dict[NodeId, set[str]] = defaultdict(set)
++        discovery_generated = 0
++        discovery_admitted = 0
++        discovery_filtered = 0
++        query_now = utc_now()
++        valid_at = cue.valid_at or query_now
++        knowledge_at = cue.knowledge_at or query_now
++        visibility: dict[NodeId, tuple[bool, object | None]] = {}
++        eligibility: dict[NodeId, bool] = {}
++        partition = getattr(self.index, "policy_partition", lambda _: None)(cue.access_context)
++
++        def visible(entity_id: NodeId) -> tuple[bool, object | None]:
++            """Return request-consistent eligibility without exposing rejected nodes.
+ 
+-        def add_seed(entity_id: NodeId, value: float, reason: str) -> None:
++            The runtime's reader lock keeps repository, policy, and index state stable for
++            the whole request.  The local cache gives direct service users the same
++            per-request decision and prevents a policy change from splitting a traversal.
++            """
++            cached = visibility.get(entity_id)
++            if cached is not None:
++                return cached
++            entity = self.memory.get(entity_id)
++            if entity is None:
++                result = (False, None)
++            elif hasattr(self.memory, "lifecycle") and (
++                self.memory.lifecycle(entity_id).state is not LifecycleState.ACTIVE
++                and not (cue.include_archived and self.memory.lifecycle(entity_id).state is LifecycleState.ARCHIVED)
++            ):
++                result = (False, None)
++            else:
++                provenance = getattr(entity, "provenance", None)
++                truth = getattr(entity, "truth", None)
++                provenance_valid = (provenance is None or self.memory.exists(provenance.source_id)
++                                    or truth is None or truth.recorded_at is None)
++                temporal_valid = (truth is None or temporally_eligible(
++                    truth, valid_at=valid_at, knowledge_at=knowledge_at,
++                    current=cue.query_mode is QueryMode.CURRENT,
++                    superseded_by_other=bool(getattr(self.index, "is_superseded", lambda _: False)(entity_id)),
++                ))
++                decision = authorize(getattr(entity, "security", None), cue.access_context)
++                result = (bool(provenance_valid and temporal_valid and decision.allowed), entity)
++                if not decision.allowed:
++                    principal_keys = tuple(sorted(cue.access_context.principal.keys)) \
++                        if cue.access_context and cue.access_context.principal else ()
++                    self.access_events.append(AccessAuditEvent(
++                        decision.code, principal_keys, entity_id,
++                        cue.access_context.purpose if cue.access_context else None, query_now,
++                    ))
++            visibility[entity_id] = result
++            return result
++
++        def add_seed(entity_id: NodeId, value: float, reason: str, *, explicit: bool = False) -> bool:
+             if entity_id not in seeds and len(seeds) >= cfg.max_candidates:
+                 truncated.add("candidates")
+-                return
+-            if not self.memory.exists(entity_id):
++                return False
++            allowed, entity = visible(entity_id)
++            if entity is None and explicit and cue.access_context is None:
+                 raise RetrievalError(RetrievalErrorCode.MISSING_ENTITY, f"missing explicit/structural entity: {entity_id}")
+-            if hasattr(self.memory,"lifecycle"):
+-                state=self.memory.lifecycle(entity_id).state
+-                if state is not LifecycleState.ACTIVE and not (cue.include_archived and state is LifecycleState.ARCHIVED): return
++            # With an access context, missing and inaccessible explicit resources are
++            # deliberately indistinguishable.  This closes direct-ID existence probes.
++            if not allowed:
++                return False
+             seeds[entity_id] = max(seeds.get(entity_id, 0.0), value)
+             reasons[entity_id].add(reason)
+             if reason.startswith("lexical:"): found_by[entity_id].add(RetrieverKind.LEXICAL.value)
+             elif reason in {"exact_id", "source_id", "context_id"}: found_by[entity_id].add(RetrieverKind.EXACT.value)
+             elif reason.startswith("entity:"): found_by[entity_id].add(RetrieverKind.ENTITY.value)
+             elif reason.startswith("semantic:"): found_by[entity_id].add(RetrieverKind.SEMANTIC.value)
++            return True
++
++        def eligible(entity_id: NodeId) -> bool:
++            if entity_id in eligibility:
++                return eligibility[entity_id]
++            snapshot_check = getattr(self.index, "request_eligible", None)
++            if snapshot_check is not None:
++                result = snapshot_check(
++                    entity_id, cue.access_context, valid_at=valid_at,
++                    knowledge_at=knowledge_at, current=cue.query_mode is QueryMode.CURRENT,
++                    partition=partition,
++                )
++            else:
++                result = visible(entity_id)[0]
++            eligibility[entity_id] = result
++            return result
+ 
+         try:
+             explicit = tuple(dict.fromkeys((*cue.entity_ids, *cue.context_ids)))
+             if len(explicit) > cfg.max_explicit_seeds:
+                 truncated.add("explicit_seeds")
+             for entity_id in explicit[:cfg.max_explicit_seeds]:
+-                add_seed(entity_id, 1.0, "context_id" if entity_id in cue.context_ids else "exact_id")
++                add_seed(entity_id, 1.0, "context_id" if entity_id in cue.context_ids else "exact_id", explicit=True)
+             if len(cue.source_ids) > cfg.max_explicit_seeds:
+                 truncated.add("explicit_seeds")
+             for source_id in cue.source_ids[:cfg.max_explicit_seeds]:
+-                add_seed(source_id, 1.0, "source_id")
+-                for entity_id in self.index.source_ids(source_id, cfg.max_lexical_seeds):
++                add_seed(source_id, 1.0, "source_id", explicit=True)
++                for entity_id in self.index.source_ids(source_id, cfg.max_lexical_seeds, eligible=eligible):
+                     add_seed(entity_id, 0.8, "source_provenance")
+             if cue.text:
++                denied_matches = getattr(self.index, "denied_lexical_ids", lambda *_args, **_kwargs: ())(
++                    cue.text, cue.access_context, cfg.max_lexical_seeds,
++                )
++                principal_keys = tuple(sorted(cue.access_context.principal.keys)) \
++                    if cue.access_context and cue.access_context.principal else ()
++                for entity_id in denied_matches:
++                    entry = getattr(self.index, "entries", {}).get(entity_id)
++                    decision = authorize(getattr(entry, "security", None), cue.access_context)
++                    self.access_events.append(AccessAuditEvent(
++                        decision.code, principal_keys, entity_id,
++                        cue.access_context.purpose if cue.access_context else None, query_now,
++                    ))
++                anchors = set(entity_terms(cue.text))
++                predicates = set(analysis.tokens) - anchors
++                # Capitalization is reliable identity evidence in short relational
++                # questions, but not in long declarative claims (sentence starts,
++                # acronyms, and scientific names). Keep those regimes separate.
++                broad_claim = len(set(analysis.tokens)) >= 6
+                 if RetrieverKind.EXACT in analysis.routes and hasattr(self.index, "exact"):
+-                    for hit in self.index.exact(cue.text, cfg.max_lexical_seeds):
++                    for hit in self.index.exact(cue.text, cfg.max_lexical_seeds, eligible=eligible):
+                         add_seed(hit.entity_id, 1.0, "exact:text")
+                         found_by[hit.entity_id].add(RetrieverKind.EXACT.value)
+                 if RetrieverKind.ENTITY in analysis.routes and hasattr(self.index, "entity"):
+-                    for hit in self.index.entity(cue.text, cfg.max_lexical_seeds):
+-                        coverage = len(set(hit.matched_tokens) & set(analysis.tokens)) / max(1, len(analysis.tokens))
+-                        if coverage < 0.5 and not self.memory.associations_for(hit.entity_id):
++                    for hit in self.index.entity(cue.text, cfg.max_lexical_seeds, eligible=eligible):
++                        allowed, _ = visible(hit.entity_id)
++                        if not allowed:
+                             continue
+-                        add_seed(hit.entity_id, hit.score, "entity:name")
++                        discovery_generated += 1
++                        matched = set(hit.matched_tokens)
++                        # Entity routing proves identity only. A relational question must
++                        # also earn lexical predicate evidence before becoming a seed.
++                        if not anchors.issubset(matched) or predicates:
++                            discovery_filtered += 1
++                            continue
++                        if add_seed(hit.entity_id, hit.score, "entity:name"):
++                            discovery_admitted += 1
+                 if RetrieverKind.LEXICAL in analysis.routes:
+-                    for hit in self.index.lexical(cue.text, cfg.max_lexical_seeds):
+-                        # Weak isolated overlap is noise; graph-linked seeds remain useful for multi-hop.
+-                        coverage = len(hit.matched_tokens) / max(1, len(analysis.tokens))
+-                        if coverage < 0.5 and not self.memory.associations_for(hit.entity_id):
++                    for hit in self.index.lexical(
++                        cue.text, cfg.max_lexical_seeds, eligible=eligible, partition=partition,
++                    ):
++                        allowed, _ = visible(hit.entity_id)
++                        if not allowed:
++                            continue
++                        discovery_generated += 1
++                        matched = set(hit.matched_tokens)
++                        coverage = len(matched) / max(1, len(set(analysis.tokens)))
++                        if anchors and not broad_claim:
++                            # An entity anchor without a matching predicate retrieves every
++                            # fact about that entity and is not sufficient relational evidence.
++                            if not anchors.issubset(matched) or (predicates and not predicates & matched):
++                                discovery_filtered += 1
++                                continue
++                        elif len(matched) < min(2, len(set(analysis.tokens))) and coverage < 0.5 \
++                                and not self.memory.associations_for(hit.entity_id):
++                            discovery_filtered += 1
+                             continue
+-                        add_seed(hit.entity_id, hit.score, f"lexical:{hit.field}")
+-                        lexical[hit.entity_id].update(hit.matched_tokens)
++                        if add_seed(hit.entity_id, hit.score, f"lexical:{hit.field}"):
++                            lexical[hit.entity_id].update(hit.matched_tokens)
++                            discovery_admitted += 1
+                 if RetrieverKind.SEMANTIC in analysis.routes and hasattr(self.index, "semantic"):
+-                    for hit in self.index.semantic(cue.text, cfg.max_lexical_seeds):
++                    for hit in self.index.semantic(cue.text, cfg.max_lexical_seeds, eligible=eligible):
+                         if hit.score >= 0.35: add_seed(hit.entity_id, hit.score, "semantic:vector")
+-                if not seeds and RetrieverKind.SEMANTIC in analysis.fallback and hasattr(self.index, "semantic"):
+-                    for hit in self.index.semantic(cue.text, min(8, cfg.max_lexical_seeds)):
++                # For anchored relational queries, an anchor-dominated deterministic
++                # vector is not evidence for the predicate and must not defeat abstention.
++                if (not seeds and RetrieverKind.SEMANTIC in analysis.fallback
++                        and hasattr(self.index, "semantic") and not (anchors and predicates)):
++                    for hit in self.index.semantic(cue.text, min(8, cfg.max_lexical_seeds), eligible=eligible):
+                         if hit.score >= 0.70: add_seed(hit.entity_id, hit.score, "semantic:fallback")
+         except RetrievalError:
+             raise
+@@ -112,7 +223,12 @@ class RetrievalService:
+             raise RetrievalError(RetrievalErrorCode.REPOSITORY_FAILURE, "seed generation failed") from exc
+         marks["seed"] = (perf_counter() - started) * 1000
+         if not seeds:
+-            return RecallResult(request.request_id, (), (), (("seeds", 0), ("edges", 0), ("candidates", 0)),
++            return RecallResult(request.request_id, (), (), (("seeds", 0), ("edges", 0), ("candidates", 0),
++                                ("discovery_generated", discovery_generated),
++                                ("discovery_admitted", discovery_admitted),
++                                ("discovery_filtered", discovery_filtered),
++                                ("authorized_candidates", 0), ("returned", 0),
++                                ("abstention_reason", "NO_ADMITTED_EVIDENCE")),
+                                 (("seed", marks["seed"]), ("expansion", 0.0), ("scoring", 0.0),
+                                  ("total", (perf_counter() - started) * 1000)),
+                                 (), cfg.version, "INSUFFICIENT_EVIDENCE",
+@@ -137,10 +253,14 @@ class RetrievalService:
+             neighbors: list[tuple[Association, NodeId]] = []
+             for edge in self.memory.associations_for(current):
+                 other = edge.target_id if edge.source_id == current else edge.source_id
+-                if self.memory.exists(other):
+-                    if hasattr(self.memory,"lifecycle") and self.memory.lifecycle(other).state is not LifecycleState.ACTIVE: continue
++                current_visible, _ = visible(current)
++                other_visible, other_entity = visible(other)
++                # Associations have no independent security envelope.  Their effective
++                # policy is therefore the conjunction of both endpoint policies.  An
++                # ineligible endpoint makes the edge non-existent for this request.
++                if current_visible and other_visible:
+                     neighbors.append((edge, other))
+-                else:
++                elif other_entity is None and cue.access_context is None:
+                     missing_edges += 1
+             neighbors.sort(key=lambda pair: (-pair[0].strength if pair[0].strength is not None else -1.0,
+                                              str(pair[0].id), _key(pair[1])))
+@@ -179,9 +299,6 @@ class RetrievalService:
+         weights = dict(cfg.weights)
+         candidates = []
+         now = cue.temporal_context
+-        query_now = utc_now()
+-        valid_at = cue.valid_at or query_now
+-        knowledge_at = cue.knowledge_at or query_now
+         for entity_id in sorted(activation, key=_key):
+             entity = self.memory.get(entity_id)
+             if entity is None:
+@@ -336,8 +453,14 @@ class RetrievalService:
+         return RecallResult(request.request_id, ranked, working,
+                             (("seeds", len(seeds)), ("candidates", len(activation)),
+                              ("edges", edges), ("missing_edges", missing_edges),
+-                             ("generated_candidates", getattr(self.index, "generated_candidates", len(seeds))),
+-                             ("ranked_candidates", getattr(self.index, "ranked_candidates", len(seeds))),
++                             # Index-global counters include policy-ineligible documents and
++                             # must never become an authorization side channel.
++                             ("generated_candidates", discovery_generated),
++                             ("ranked_candidates", discovery_admitted),
++                             ("discovery_generated", discovery_generated),
++                             ("discovery_admitted", discovery_admitted),
++                             ("discovery_filtered", discovery_filtered),
++                             ("authorized_candidates", len(candidates)),
+                              ("returned", len(ranked))),
+                             (("seed", marks["seed"]), ("expansion", marks["expansion"]),
+                              ("scoring", marks["scoring"]), ("total", (perf_counter() - started) * 1000)),
+diff --git a/src/syune/sdk/client.py b/src/syune/sdk/client.py
+index 58d20df..0868669 100644
+--- a/src/syune/sdk/client.py
++++ b/src/syune/sdk/client.py
+@@ -89,6 +89,9 @@ class Syune:
+             raise SyuneError("INVALID_REQUEST", str(exc), ErrorCategory.INVALID_REQUEST) from None
+ 
+     def close(self) -> None: self.__runtime.close()
++    def _fork_reader(self) -> "Syune":
++        """Internal lifecycle hook for bounded application-owned read pools."""
++        return type(self)(SyuneRuntime.reader(self.__runtime), self._mode, self._model_gateway)
+     def __enter__(self) -> "Syune": return self
+     def __exit__(self, *_: object) -> None: self.close()
+ 
+diff --git a/src/syune/study/registry.py b/src/syune/study/registry.py
+index 9423efa..ba197b9 100644
+--- a/src/syune/study/registry.py
++++ b/src/syune/study/registry.py
+@@ -66,7 +66,11 @@ class SqliteStudyRegistry:
+     def __init__(self, path: str | Path):
+         self.path = Path(path)
+         self.path.parent.mkdir(parents=True, exist_ok=True)
+-        self._db = sqlite3.connect(self.path)
++        # A lifecycle-managed runtime may be created, used, and closed by
++        # different application worker threads. Operations remain coordinated by
++        # the owning runtime; disabling SQLite's creator-thread check permits the
++        # connection to be closed safely during application shutdown.
++        self._db = sqlite3.connect(self.path, check_same_thread=False)
+         self._db.row_factory = sqlite3.Row
+         self._db.execute("PRAGMA foreign_keys = ON")
+         version=self._db.execute("PRAGMA user_version").fetchone()[0]
+diff --git a/tests/phase02a/test_retrieval_configuration.py b/tests/phase02a/test_retrieval_configuration.py
+index df81a45..6b63171 100644
+--- a/tests/phase02a/test_retrieval_configuration.py
++++ b/tests/phase02a/test_retrieval_configuration.py
+@@ -101,8 +101,12 @@ def test_ranking_access_isolation_and_restart_are_deterministic(tmp_path):
+     with Syune.open(state_root=state, config=config_path) as first_client:
+         first = first_client.recall(request)
+         first_ranking = ranked_ids(first)
+-        assert len(first_ranking) == 93
+-        assert [rank for _, rank, _ in first_ranking] == list(range(1, 94))
++        # Seven restricted lexical roots are removed before seed selection and
++        # traversal. Public tails reachable only through those roots are therefore
++        # intentionally absent; retaining the former count of 93 would preserve an
++        # authorization-dependent graph influence channel.
++        assert len(first_ranking) == 82
++        assert [rank for _, rank, _ in first_ranking] == list(range(1, 83))
+     with Syune.open(state_root=state, config=config_path) as second_client:
+         second_ranking = ranked_ids(second_client.recall(request))
+     assert second_ranking == first_ranking
+diff --git a/tests/phase02d/test_aml_http_adapter.py b/tests/phase02d/test_aml_http_adapter.py
+index 0660c33..c30407f 100644
+--- a/tests/phase02d/test_aml_http_adapter.py
++++ b/tests/phase02d/test_aml_http_adapter.py
+@@ -1,8 +1,11 @@
+ from concurrent.futures import ThreadPoolExecutor
++import threading
++import time
+ 
+ import pytest
+ from fastapi.testclient import TestClient
+ 
++import syune.adapters.aml.v1 as aml
+ from syune.adapters.aml import AdapterSettings, create_app
+ 
+ 
+@@ -121,6 +124,25 @@ def test_identical_replay_and_global_conflict(tmp_path):
+     assert conflict.json() == {"detail": {"reason": "request_id conflict"}}
+ 
+ 
++def test_global_conflict_is_precommit_and_does_not_rebuild_runtime(tmp_path, caplog):
++    with caplog.at_level("INFO", logger="syune.aml.operations"):
++        with make_client(tmp_path) as client:
++            payload = add_payload(messages=[{"role": "user", "content": "stable payload"}])
++            assert client.post("/add", headers=AUTH, json=payload).status_code == 200
++            before = client.post("/search", headers=AUTH,
++                                 json=search_payload(query="stable payload")).json()
++            conflict = client.post("/add", headers=AUTH,
++                                   json=add_payload(user_id="different-user"))
++            assert conflict.status_code == 409
++            after = client.post("/search", headers=AUTH,
++                                json=search_payload(query="stable payload")).json()
++    recovery_rebuilds = [record for record in caplog.records
++                         if '\"event\":\"index_rebuild\"' in record.message
++                         and '\"recovery\":true' in record.message]
++    assert not recovery_rebuilds
++    assert before == after
++
++
+ def test_restart_persistence_and_immediate_searchability(tmp_path):
+     with make_client(tmp_path) as client:
+         assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
+@@ -173,6 +195,124 @@ def test_concurrent_add_and_search_use_bounded_owned_connections(tmp_path):
+     assert statuses == (200, 200, 200, 200)
+ 
+ 
++def test_runtime_opens_once_for_repeated_warm_searches(tmp_path, monkeypatch):
++    original = aml.Syune.open
++    calls = 0
++
++    def counted(*args, **kwargs):
++        nonlocal calls
++        calls += 1
++        return original(*args, **kwargs)
++
++    monkeypatch.setattr(aml.Syune, "open", counted)
++    with make_client(tmp_path, max_concurrency=16) as client:
++        assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
++        with ThreadPoolExecutor(max_workers=16) as pool:
++            responses = tuple(pool.map(
++                lambda _: client.post("/search", headers=AUTH, json=search_payload()),
++                range(16),
++            ))
++    assert calls == 1
++    assert all(response.status_code == 200 and response.json()["data"] for response in responses)
++
++
++def test_searches_execute_concurrently_on_independent_readers(tmp_path, monkeypatch):
++    original = aml.Syune.recall
++    lock = threading.Lock()
++    active = 0
++    maximum = 0
++
++    def observed(self, *args, **kwargs):
++        nonlocal active, maximum
++        with lock:
++            active += 1
++            maximum = max(maximum, active)
++        try:
++            time.sleep(.05)
++            return original(self, *args, **kwargs)
++        finally:
++            with lock:
++                active -= 1
++
++    monkeypatch.setattr(aml.Syune, "recall", observed)
++    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
++        assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
++        with ThreadPoolExecutor(max_workers=16) as pool:
++            responses = tuple(pool.map(
++                lambda _: client.post("/search", headers=AUTH, json=search_payload()),
++                range(16),
++            ))
++    assert maximum > 1
++    assert all(response.status_code == 200 and response.json()["data"] for response in responses)
++
++
++def test_repeated_mixed_bursts_preserve_visibility(tmp_path):
++    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
++        for burst in range(3):
++            def request(index):
++                if index < 8:
++                    marker = burst * 8 + index
++                    return client.post("/add", headers=AUTH, json=add_payload(
++                        f"mixed-{marker}", messages=[{
++                            "role": "user", "content": f"mixed visibility marker {marker}"
++                        }]))
++                return client.post("/search", headers=AUTH,
++                                   json=search_payload(query="mixed visibility marker"))
++
++            with ThreadPoolExecutor(max_workers=16) as pool:
++                responses = tuple(pool.map(request, range(16)))
++            assert all(response.status_code == 200 for response in responses)
++        found = client.post("/search", headers=AUTH,
++                            json=search_payload(query="mixed visibility marker", top_k=100))
++    assert found.status_code == 200
++    assert len(found.json()["data"]) == 24
++
++
++def test_sixteen_concurrent_adds_are_visible_and_idempotent(tmp_path):
++    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
++        def add(index):
++            return client.post("/add", headers=AUTH, json=add_payload(
++                f"burst-{index}", messages=[{
++                    "role": "user", "content": f"unique burst marker {index}"
++                }],
++            ))
++
++        with ThreadPoolExecutor(max_workers=16) as pool:
++            responses = tuple(pool.map(add, range(16)))
++        found = client.post("/search", headers=AUTH,
++                            json=search_payload(query="unique burst marker", top_k=100))
++    assert all(response.status_code == 200 for response in responses)
++    assert found.status_code == 200
++    assert len(found.json()["data"]) == 16
++
++
++def test_committed_add_index_failure_recovers_before_retry(tmp_path, monkeypatch):
++    original = aml.Syune.add_batch
++    injected = False
++
++    def fail_after_commit(self, *args, **kwargs):
++        nonlocal injected
++        result = original(self, *args, **kwargs)
++        if not injected:
++            injected = True
++            raise RuntimeError("synthetic post-commit index failure")
++        return result
++
++    monkeypatch.setattr(aml.Syune, "add_batch", fail_after_commit)
++    payload = add_payload("recoverable")
++    settings = AdapterSettings(
++        state_root=(tmp_path / "aml-evaluation").resolve(),
++        bearer_token=TOKEN,
++    )
++    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
++        failed = client.post("/add", headers=AUTH, json=payload)
++        retried = client.post("/add", headers=AUTH, json=payload)
++        found = client.post("/search", headers=AUTH, json=search_payload())
++    assert failed.status_code == 500
++    assert retried.status_code == 200
++    assert found.status_code == 200 and found.json()["data"]
++
++
+ def test_oversized_payload_is_rejected_before_parsing(tmp_path):
+     with make_client(tmp_path, max_body_bytes=1024) as client:
+         response = client.post("/add",
+diff --git a/tests/phase21/test_hybrid_retrieval.py b/tests/phase21/test_hybrid_retrieval.py
+index 3f6925a..aeb54c5 100644
+--- a/tests/phase21/test_hybrid_retrieval.py
++++ b/tests/phase21/test_hybrid_retrieval.py
+@@ -42,6 +42,37 @@ def test_exact_lexical_entity_semantic_and_incremental_indexing():
+     assert later in {hit.entity_id for hit in index.semantic("Juniper release automobile", 4)}
+ 
+ 
++def test_entity_hits_report_only_actual_matches_and_relations_must_match():
++    repo, add = memory()
++    location = add("Atlas-17 headquarters is in Northport")
++    add("Atlas-17 publishes maintenance notes")
++    other = add("Boreal-22 headquarters is in Southport")
++    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
++
++    entity_hits = {hit.entity_id: hit for hit in index.entity("Where is Atlas-17?", 10)}
++    assert set(entity_hits[location].matched_tokens) == {"atlas", "17"}
++    assert other not in entity_hits
++
++    relevant = service.recall(RecallRequest(RecallCue(text="Where is Atlas-17 headquarters?")))
++    assert [item.entity_id for item in relevant.candidates] == [location]
++    absent = service.recall(RecallRequest(RecallCue(text="What launch password belongs to Atlas-17?")))
++    assert not absent.candidates and absent.evidence_status == "INSUFFICIENT_EVIDENCE"
++
++
++def test_fixed_relation_equivalence_recovers_paraphrase_without_relation_drift():
++    repo, add = memory()
++    manager = add("Avery supervises Atlas-17")
++    location = add("Atlas-17 is situated in Northport")
++    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
++
++    managed = service.recall(RecallRequest(RecallCue(text="Who manages Atlas-17?")))
++    assert [item.entity_id for item in managed.candidates] == [manager]
++    located = service.recall(RecallRequest(RecallCue(text="Where is Atlas-17 located?")))
++    assert [item.entity_id for item in located.candidates] == [location]
++    ownership = service.recall(RecallRequest(RecallCue(text="Who owns Atlas-17?")))
++    assert not ownership.candidates
++
++
+ def test_abstention_duplicate_context_and_associative_explainability():
+     repo, add = memory(); first = add("orchard budget exact"); duplicate = add("orchard budget exact")
+     index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
+@@ -74,3 +105,29 @@ def test_semantic_ablation_is_deterministic():
+     first = index.search(provider.embed(("automobile lead",))[0], 3)
+     second = index.search(provider.embed(("automobile lead",))[0], 3)
+     assert first == second and {item[0] for item in first[:2]} == {ids[0], ids[1]}
++
++
++def test_long_claim_discovers_multi_term_evidence_without_mandatory_capitalized_anchor():
++    repo, add = memory()
++    evidence = add("Dietary nitrate supplementation reduces resting blood pressure in healthy adults")
++    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
++    result = service.recall(RecallRequest(RecallCue(
++        text="Scientific studies report dietary nitrate can reduce resting pressure among adults"
++    )))
++    assert [item.entity_id for item in result.candidates] == [evidence]
++    diagnostics = dict(result.diagnostics)
++    assert diagnostics["discovery_admitted"] >= 1
++    assert diagnostics["authorized_candidates"] == 1
++
++
++def test_long_claim_single_generic_overlap_is_filtered_with_safe_diagnostics():
++    repo, add = memory()
++    add("Dietary nitrate supplementation reduces resting blood pressure in healthy adults")
++    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
++    result = service.recall(RecallRequest(RecallCue(
++        text="Scientific archives discuss unrelated planetary geology and healthy ecosystems"
++    )))
++    assert result.candidates == ()
++    diagnostics = dict(result.diagnostics)
++    assert diagnostics["discovery_filtered"] >= 1
++    assert diagnostics["abstention_reason"] == "NO_ADMITTED_EVIDENCE"
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..252c2c7
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,13 @@
++.git
++.venv
++.aml09a-venv
++.aml09a-cache
++.pytest_cache
++__pycache__
++*.pyc
++benchmarks
++contracts
++docs
++examples
++tests
++deploy/aml09b1
+diff --git a/tests/phase21/test_retrieval_graph_non_interference.py b/tests/phase21/test_retrieval_graph_non_interference.py
+new file mode 100644
+index 0000000..2c1b48a
+--- /dev/null
++++ b/tests/phase21/test_retrieval_graph_non_interference.py
+@@ -0,0 +1,267 @@
++from dataclasses import replace
++from datetime import datetime, timezone
++from concurrent.futures import ThreadPoolExecutor
++from threading import Event
++
++from syune.core import AssociationId, Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (
++    AccessContext, Association, LifecycleState, Observation, Principal, Provenance,
++    SecurityEnvelope, Source,
++)
++from syune.memory.repository import InMemoryReferenceRepository
++from syune.retrieval import InvertedSeedIndex, RecallCue, RecallRequest, RetrievalService
++from syune.adapters.aml.v1 import _ReadWriteLock
++
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++BOB = AccessContext(Principal("bob", "agent-b"), "audit", legacy_local_compatible=False)
++
++
++def build(*, hidden: bool = True, two_hop: bool = False, denied: bool = False):
++    repo = InMemoryReferenceRepository()
++    source = Source(SourceId.new(), "audit", "aml09j", NOW)
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    public = Observation(
++        ObservationId.new(), "ordinary public note", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(source); repo.put(public)
++    secret = middle = None
++    if hidden:
++        denied_principals = ("user:bob",) if denied else ()
++        secret = Observation(
++            ObservationId.new(), "cinnabar-private-trigger", "text", provenance, NOW, NOW,
++            Confidence(1), security=SecurityEnvelope(
++                owner="user:alice", agent_scope="agent-a",
++                allowed_principals=("user:bob",) if denied else (),
++                denied_principals=denied_principals,
++            ),
++        )
++        repo.put(secret)
++        endpoint = secret
++        if two_hop:
++            middle = Observation(
++                ObservationId.new(), "alice hidden bridge", "text", provenance, NOW, NOW,
++                Confidence(1), security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++            )
++            repo.put(middle)
++            repo.add_association(Association(
++                AssociationId.new(), secret.id, middle.id, "associated_with", provenance,
++                Confidence(1), NOW, 1.0,
++            ))
++            endpoint = middle
++        repo.add_association(Association(
++            AssociationId.new(), endpoint.id, public.id, "associated_with", provenance,
++            Confidence(1), NOW, 1.0,
++        ))
++    index = InvertedSeedIndex(repo); index.rebuild()
++    return repo, index, RetrievalService(repo, index), source, secret, public, middle
++
++
++def stable(result):
++    """Observable retrieval state excluding nondeterministic wall-clock timings."""
++    return result.candidates, result.working_memory, result.diagnostics, result.evidence_status, result.route
++
++
++def test_direct_id_and_context_id_are_authorized_before_graph_expansion():
++    _, _, service, _, secret, public, _ = build()
++    direct = service.recall(RecallRequest(RecallCue(entity_ids=(secret.id,), access_context=BOB)))
++    context = service.recall(RecallRequest(RecallCue(context_ids=(secret.id,), access_context=BOB)))
++    assert direct.candidates == context.candidates == ()
++    assert public.id not in {item.entity_id for item in direct.candidates + context.candidates}
++
++
++def test_two_hop_hidden_path_and_deny_precedence_cannot_reveal_public_neighbor():
++    for kwargs in ({"two_hop": True}, {"denied": True}):
++        _, _, service, _, _, public, _ = build(**kwargs)
++        result = service.recall(RecallRequest(RecallCue(
++            text="cinnabar-private-trigger", access_context=BOB,
++        )))
++        assert result.candidates == ()
++        assert public.id not in {item.entity_id for item in result.candidates}
++
++
++def test_hidden_graph_addition_is_observationally_non_interfering():
++    _, _, without, _, _, _, _ = build(hidden=False)
++    _, _, with_hidden, _, _, _, _ = build(hidden=True)
++    query = RecallRequest(RecallCue(text="cinnabar-private-trigger", access_context=BOB))
++    assert stable(without.recall(query)) == stable(with_hidden.recall(query))
++    # Warm partitions must preserve the exact same observable view.
++    assert stable(without.recall(query)) == stable(with_hidden.recall(query))
++    assert "cinnabar" not in repr(with_hidden.recall(query).diagnostics)
++
++
++def test_hidden_semantic_candidates_cannot_crow_visible_fallback():
++    repo, index, service, source, _, public, _ = build(hidden=False)
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    for number in range(48):
++        repo.put(Observation(
++            ObservationId.new(), f"similar concept idea {number}", "text", provenance, NOW, NOW,
++            Confidence(1), security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++        ))
++    visible = Observation(
++        ObservationId.new(), "similar concept idea visible", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(visible); index.sync()
++    result = service.recall(RecallRequest(RecallCue(text="similar concept idea", access_context=BOB)))
++    ids = {item.entity_id for item in result.candidates}
++    assert visible.id in ids
++    assert all(getattr(repo.get(item), "security").owner == "user:bob" for item in ids)
++
++
++def test_authorized_same_principal_association_still_expands():
++    repo, index, service, source, _, public, _ = build(hidden=False)
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    seed = Observation(
++        ObservationId.new(), "cinnabar-owned-trigger", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(seed)
++    repo.add_association(Association(
++        AssociationId.new(), seed.id, public.id, "associated_with", provenance,
++        Confidence(1), NOW, 1.0,
++    ))
++    index.sync()
++    result = service.recall(RecallRequest(RecallCue(text="cinnabar-owned-trigger", access_context=BOB)))
++    ids = {item.entity_id for item in result.candidates}
++    assert seed.id in ids and public.id in ids
++
++
++def test_source_seed_and_shared_name_return_only_request_visible_records():
++    repo, index, service, source, secret, public, _ = build()
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    bob_shared = Observation(
++        ObservationId.new(), "shared codename heliotrope", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    alice_shared = Observation(
++        ObservationId.new(), "shared codename heliotrope", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++    )
++    repo.put(bob_shared); repo.put(alice_shared); index.sync()
++    by_name = service.recall(RecallRequest(RecallCue(
++        text="shared codename heliotrope", access_context=BOB,
++    )))
++    by_source = service.recall(RecallRequest(RecallCue(
++        source_ids=(source.id,), access_context=BOB,
++    )))
++    assert bob_shared.id in {item.entity_id for item in by_name.candidates}
++    assert alice_shared.id not in {item.entity_id for item in by_name.candidates}
++    source_ids = {item.entity_id for item in by_source.candidates}
++    assert public.id in source_ids and bob_shared.id in source_ids
++    assert secret.id not in source_ids and alice_shared.id not in source_ids
++
++
++def test_revocation_and_archived_hidden_endpoint_fail_closed_without_rebuild():
++    repo, index, service, source, _, public, _ = build(hidden=False)
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    seed = Observation(
++        ObservationId.new(), "revocable cinnabar trigger", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(seed)
++    repo.add_association(Association(
++        AssociationId.new(), seed.id, public.id, "associated_with", provenance,
++        Confidence(1), NOW, 1.0,
++    ))
++    index.sync()
++    assert public.id in {item.entity_id for item in service.recall(RecallRequest(RecallCue(
++        text="revocable cinnabar trigger", access_context=BOB,
++    ))).candidates}
++    repo.replace(replace(
++        seed, security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++    ))
++    index.sync()
++    revoked = service.recall(RecallRequest(RecallCue(
++        text="revocable cinnabar trigger", access_context=BOB,
++    )))
++    assert revoked.candidates == ()
++    repo.transition_lifecycle(seed.id, LifecycleState.ARCHIVED, "security test")
++    index.sync()
++    archived = service.recall(RecallRequest(RecallCue(
++        entity_ids=(seed.id,), include_archived=True, access_context=BOB,
++    )))
++    assert archived.candidates == ()
++
++
++def test_policy_partition_generation_invalidates_add_policy_lifecycle_association_and_rebuild():
++    repo, index, service, source, _, public, _ = build(hidden=False)
++    query = RecallRequest(RecallCue(text="ordinary public note", access_context=BOB))
++    service.recall(query); service.recall(query)
++    before = index.partition_metrics()
++    assert before["hits"] >= 1 and before["entries"] == 1
++
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    added = Observation(
++        ObservationId.new(), "ordinary public note added", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(added); index.sync()
++    assert index.partition_metrics()["entries"] == 0
++    service.recall(query)
++
++    repo.replace(replace(added, security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a")))
++    index.sync(); assert index.partition_metrics()["entries"] == 0
++    assert added.id not in {item.entity_id for item in service.recall(query).candidates}
++
++    repo.transition_lifecycle(public.id, LifecycleState.ARCHIVED, "cache invalidation")
++    index.sync(); assert index.partition_metrics()["entries"] == 0
++    service.recall(query)
++
++    # Associations do not alter corpus membership, but publication still invalidates
++    # as required by the runtime's write-generation contract.
++    repo.add_association(Association(
++        AssociationId.new(), source.id, added.id, "associated_with", provenance,
++        Confidence(1), NOW, 1.0,
++    ))
++    index.sync(); assert index.partition_metrics()["entries"] == 0
++    service.recall(query); index.rebuild()
++    assert index.partition_metrics()["entries"] == 0
++
++
++def test_completed_revocation_is_never_stale_under_concurrent_search():
++    repo, index, service, source, _, public, _ = build(hidden=False)
++    provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++    seed = Observation(
++        ObservationId.new(), "revocation-race-unique-trigger", "text", provenance, NOW, NOW,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    repo.put(seed)
++    repo.add_association(Association(
++        AssociationId.new(), seed.id, public.id, "associated_with", provenance,
++        Confidence(1), NOW, 1.0,
++    ))
++    index.sync()
++    request = RecallRequest(RecallCue(text="revocation-race-unique-trigger", access_context=BOB))
++    assert public.id in {item.entity_id for item in service.recall(request).candidates}
++    revoked = Event()
++    runtime_lock = _ReadWriteLock()
++    after = []
++
++    def reader():
++        for _ in range(20):
++            runtime_lock.acquire_read()
++            try:
++                result = service.recall(request)
++                if revoked.is_set():
++                    after.append(tuple(item.entity_id for item in result.candidates))
++            finally:
++                runtime_lock.release_read()
++
++    with ThreadPoolExecutor(max_workers=8) as pool:
++        futures = [pool.submit(reader) for _ in range(8)]
++        runtime_lock.acquire_write()
++        try:
++            repo.replace(replace(
++                seed, security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++            ))
++            index.sync()  # publish before releasing the supported runtime writer lock
++            revoked.set()
++        finally:
++            runtime_lock.release_write()
++        for future in futures:
++            future.result()
++    assert after
++    assert all(seed.id not in ids and public.id not in ids for ids in after)
++
+diff --git a/tests/phase21/test_retrieval_security_expansion.py b/tests/phase21/test_retrieval_security_expansion.py
+new file mode 100644
+index 0000000..9cd175c
+--- /dev/null
++++ b/tests/phase21/test_retrieval_security_expansion.py
+@@ -0,0 +1,40 @@
++"""AML-09I adversarial authorization-boundary coverage."""
++from datetime import datetime, timezone
++
++from syune.core import AssociationId, Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (
++    AccessContext, Association, InMemoryReferenceRepository, Observation, Principal,
++    Provenance, SecurityEnvelope, Source,
++)
++from syune.retrieval import InvertedSeedIndex, RecallCue, RecallRequest, RetrievalService
++
++
++def test_unauthorized_lexical_seed_cannot_reveal_authorized_neighbor() -> None:
++    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
++    repo = InMemoryReferenceRepository()
++    source = Source(SourceId.new(), "audit", "aml09i", now)
++    provenance = Provenance(ProvenanceId.new(), source.id, now)
++    secret = Observation(
++        ObservationId.new(), "cinnabar-private-trigger", "text", provenance, now, now,
++        Confidence(1), security=SecurityEnvelope(owner="user:alice", agent_scope="agent-a"),
++    )
++    public = Observation(
++        ObservationId.new(), "ordinary public note", "text", provenance, now, now,
++        Confidence(1), security=SecurityEnvelope(owner="user:bob", agent_scope="agent-b"),
++    )
++    for item in (source, secret, public):
++        repo.put(item)
++    repo.add_association(Association(
++        AssociationId.new(), secret.id, public.id, "associated_with", provenance,
++        Confidence(1), now, 1.0,
++    ))
++    index = InvertedSeedIndex(repo)
++    index.rebuild()
++    service = RetrievalService(repo, index)
++    access = AccessContext(Principal("bob", "agent-b"), "audit", legacy_local_compatible=False)
++
++    result = service.recall(RecallRequest(RecallCue(
++        text="cinnabar-private-trigger", access_context=access,
++    )))
++
++    assert result.candidates == ()
+diff --git a/deploy/aml09b1/compose.yaml b/deploy/aml09b1/compose.yaml
+new file mode 100644
+index 0000000..cf4d5b8
+--- /dev/null
++++ b/deploy/aml09b1/compose.yaml
+@@ -0,0 +1,66 @@
++services:
++  app:
++    image: syune-aml09b1:local
++    build:
++      context: ../..
++      dockerfile: deploy/aml/Dockerfile
++    command: ["uvicorn", "syune.adapters.aml.v1:app_from_environment", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "${AML_UVICORN_LIMIT:-40}", "--timeout-keep-alive", "5", "--timeout-graceful-shutdown", "120", "--log-config", "/etc/syune/logging.json", "--no-access-log", "--no-server-header"]
++    environment:
++      SYUNE_AML_STATE_ROOT: /var/lib/syune-aml
++      SYUNE_AML_BEARER_TOKEN_FILE: /run/secrets/aml_bearer_token
++      SYUNE_AML_MAX_BODY_BYTES: "1048576"
++      SYUNE_AML_MAX_CONCURRENCY: ${AML_APP_CONCURRENCY:-4}
++      SYUNE_AML_QUEUE_WAIT_SECONDS: ${AML_QUEUE_WAIT_SECONDS:-1}
++      SYUNE_AML_MIN_FREE_BYTES: "0"
++    secrets: [aml_bearer_token]
++    volumes:
++      - aml09b1_state:/var/lib/syune-aml
++      - ./logging.json:/etc/syune/logging.json:ro
++    expose: ["8080"]
++    read_only: true
++    mem_limit: ${AML_APP_MEMORY:-2g}
++    cpus: ${AML_APP_CPUS:-2.0}
++    pids_limit: 256
++    tmpfs:
++      - /tmp:size=64m,mode=1777
++    cap_drop: [ALL]
++    security_opt: [no-new-privileges:true]
++    stop_grace_period: 3m
++    healthcheck:
++      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=5).read()"]
++      interval: 3s
++      timeout: 2s
++      retries: 20
++      start_period: 5s
++    networks: [aml09b1]
++  proxy:
++    image: nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284
++    user: "101:101"
++    depends_on:
++      app: {condition: service_healthy}
++    command: ["/bin/sh", "-c", "envsubst '$$AML_NGINX_RATE $$AML_NGINX_BURST $$AML_NGINX_CONNECTIONS' < /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
++    environment:
++      AML_NGINX_RATE: ${AML_NGINX_RATE:-64r/s}
++      AML_NGINX_BURST: ${AML_NGINX_BURST:-64}
++      AML_NGINX_CONNECTIONS: ${AML_NGINX_CONNECTIONS:-40}
++    ports: ["127.0.0.1:${AML_HOST_PORT:-18443}:8443"]
++    volumes:
++      - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
++      - ${AML_TLS_CERT_FILE:?set local certificate path}:/run/tls/fullchain.pem:ro
++      - ${AML_TLS_KEY_FILE:?set local key path}:/run/tls/privkey.pem:ro
++    read_only: true
++    mem_limit: 256m
++    cpus: 1.0
++    pids_limit: 128
++    tmpfs:
++      - /var/cache/nginx:size=32m,uid=101,gid=101,mode=0700
++      - /var/run:size=8m,uid=101,gid=101,mode=0700
++      - /tmp:size=16m,uid=101,gid=101,mode=0700
++    cap_drop: [ALL]
++    security_opt: [no-new-privileges:true]
++    networks: [aml09b1]
++volumes: {aml09b1_state: {}}
++networks: {aml09b1: {}}
++secrets:
++  aml_bearer_token:
++    file: ${AML_BEARER_TOKEN_FILE:?set dummy token file path}
+diff --git a/deploy/aml09b1/logging.json b/deploy/aml09b1/logging.json
+new file mode 100644
+index 0000000..9d70143
+--- /dev/null
++++ b/deploy/aml09b1/logging.json
+@@ -0,0 +1,20 @@
++{
++  "version": 1,
++  "disable_existing_loggers": false,
++  "formatters": {
++    "plain": {"format": "%(levelname)s %(name)s %(message)s"}
++  },
++  "handlers": {
++    "stderr": {
++      "class": "logging.StreamHandler",
++      "formatter": "plain",
++      "stream": "ext://sys.stderr"
++    }
++  },
++  "root": {"level": "INFO", "handlers": ["stderr"]},
++  "loggers": {
++    "uvicorn": {"level": "INFO", "propagate": true},
++    "uvicorn.access": {"level": "WARNING", "propagate": true},
++    "syune.aml.operations": {"level": "INFO", "propagate": true}
++  }
++}
+diff --git a/deploy/aml09b1/nginx.conf.template b/deploy/aml09b1/nginx.conf.template
+new file mode 100644
+index 0000000..f04f663
+--- /dev/null
++++ b/deploy/aml09b1/nginx.conf.template
+@@ -0,0 +1,42 @@
++worker_processes 1;
++pid /tmp/nginx.pid;
++events { worker_connections 256; }
++http {
++    include /etc/nginx/mime.types;
++    default_type application/octet-stream;
++    server_tokens off;
++    log_format operations escape=json '{"time":"$time_iso8601","method":"$request_method","path":"$uri","status":$status,"duration":$request_time,"upstream_status":"$upstream_status","upstream_time":"$upstream_response_time"}';
++    access_log /dev/stdout operations;
++    error_log /dev/stderr warn;
++    limit_req_zone $binary_remote_addr zone=aml_per_ip:10m rate=${AML_NGINX_RATE};
++    limit_conn_zone $binary_remote_addr zone=aml_connections:10m;
++    limit_req_status 429;
++    limit_conn_status 429;
++    map $status $retry_after { 429 "1"; 503 "1"; default ""; }
++    upstream syune_aml { server app:8080; keepalive 64; }
++    server {
++        listen 8443 ssl;
++        server_name localhost;
++        ssl_certificate /run/tls/fullchain.pem;
++        ssl_certificate_key /run/tls/privkey.pem;
++        ssl_protocols TLSv1.2 TLSv1.3;
++        ssl_session_tickets off;
++        add_header Retry-After $retry_after always;
++        client_max_body_size 1m;
++        client_body_timeout 30s;
++        location = /health { proxy_pass http://syune_aml; proxy_connect_timeout 5s; proxy_read_timeout 10s; }
++        location ~ ^/(add|search)$ {
++            limit_req zone=aml_per_ip burst=${AML_NGINX_BURST} nodelay;
++            limit_conn aml_connections ${AML_NGINX_CONNECTIONS};
++            proxy_pass http://syune_aml;
++            proxy_http_version 1.1;
++            proxy_set_header Host $host;
++            proxy_set_header Connection "";
++            proxy_connect_timeout 5s;
++            proxy_send_timeout 180s;
++            proxy_read_timeout 180s;
++            proxy_request_buffering on;
++        }
++        location / { return 404; }
++    }
++}
+diff --git a/benchmarks/aml09b1_e2e.py b/benchmarks/aml09b1_e2e.py
+new file mode 100644
+index 0000000..3a02f33
+--- /dev/null
++++ b/benchmarks/aml09b1_e2e.py
+@@ -0,0 +1,216 @@
++"""Synthetic HTTPS load probe for the isolated AML-09B.1 Compose stack."""
++from __future__ import annotations
++
++import argparse
++import json
++import ssl
++import statistics
++import subprocess
++import threading
++import time
++import urllib.error
++import urllib.request
++from collections import Counter
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++
++TOKEN = "aml09b1-dummy-local-token"
++SSL = ssl._create_unverified_context()
++
++
++def request(url: str, path: str, payload: dict | None = None) -> tuple[int, bytes, float]:
++    body = json.dumps(payload).encode() if payload is not None else None
++    headers = {"Authorization": f"Bearer {TOKEN}"}
++    if body is not None: headers["Content-Type"] = "application/json"
++    call = urllib.request.Request(url + path, data=body, headers=headers,
++                                  method="POST" if body is not None else "GET")
++    started = time.perf_counter()
++    try:
++        with urllib.request.urlopen(call, context=SSL, timeout=190) as response:
++            return response.status, response.read(), (time.perf_counter() - started) * 1000
++    except urllib.error.HTTPError as exc:
++        return exc.code, exc.read(), (time.perf_counter() - started) * 1000
++    except urllib.error.URLError as exc:
++        return 0, str(exc.reason).encode(), (time.perf_counter() - started) * 1000
++
++
++def pct(values: list[float]) -> dict[str, float]:
++    ordered = sorted(values)
++    pick = lambda q: ordered[min(len(ordered) - 1, int(len(ordered) * q))]
++    return {"p50_ms": round(statistics.median(ordered), 3),
++            "p95_ms": round(pick(.95), 3), "p99_ms": round(pick(.99), 3)}
++
++
++def size_bytes(value: str) -> float:
++    number, unit = value.strip().split()[:2] if " " in value.strip() else (value[:-3], value[-3:])
++    factors = {"B": 1, "kB": 1000, "KB": 1000, "KiB": 1024, "MB": 1000**2,
++               "MiB": 1024**2, "GB": 1000**3, "GiB": 1024**3}
++    return float(number) * factors.get(unit, 1)
++
++
++class ResourceMonitor:
++    def __init__(self, ids: list[str]):
++        self.ids, self.stop = ids, threading.Event()
++        self.samples: dict[str, dict[str, float]] = {item: {"cpu_percent": 0, "rss_bytes": 0} for item in ids}
++        self.thread = threading.Thread(target=self._run, daemon=True)
++
++    def _run(self):
++        while not self.stop.wait(.25):
++            result = subprocess.run(["docker", "stats", "--no-stream", "--format", "{{json .}}", *self.ids],
++                                    capture_output=True, text=True)
++            for line in result.stdout.splitlines():
++                try:
++                    row = json.loads(line); cid = row["ID"]
++                    cpu = float(row["CPUPerc"].rstrip("%")); rss = size_bytes(row["MemUsage"].split("/")[0].strip())
++                    full_id = next((item for item in self.ids if item.startswith(cid)), None)
++                    if full_id is not None:
++                        self.samples[full_id]["cpu_percent"] = max(self.samples[full_id]["cpu_percent"], cpu)
++                        self.samples[full_id]["rss_bytes"] = max(self.samples[full_id]["rss_bytes"], rss)
++                except (KeyError, ValueError, json.JSONDecodeError):
++                    pass
++
++    def __enter__(self): self.thread.start(); return self
++    def __exit__(self, *_): self.stop.set(); self.thread.join(timeout=3)
++
++
++def classify(status: int, body: bytes) -> str:
++    if status == 429: return "nginx_429"
++    if status == 503 and b"service capacity exhausted" in body: return "app_503"
++    if status == 503: return "uvicorn_or_proxy_503"
++    if status >= 500: return "other_5xx"
++    if status == 0: return "transport_error"
++    return str(status)
++
++
++def container_logs(container_id: str) -> list[str]:
++    result = subprocess.run(["docker", "logs", container_id], capture_output=True, text=True)
++    return (result.stdout + result.stderr).splitlines()
++
++
++def event_count(lines: list[str], event: str) -> int:
++    return sum(f'"event":"{event}"' in line for line in lines)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--url", default="https://127.0.0.1:18443")
++    parser.add_argument("--records", type=int, required=True)
++    parser.add_argument("--bursts", type=int, default=3)
++    parser.add_argument("--settle-seconds", type=float, default=0)
++    parser.add_argument("--project", required=True)
++    parser.add_argument("--compose", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    compose = ["docker", "compose", "-f", str(args.compose), "-p", args.project]
++    ids = subprocess.check_output([*compose, "ps", "-q"], text=True).split()
++    seed_latencies = []
++    seed_retries = 0
++    startup_retries = 0
++    for offset in range(0, args.records, 20):
++        payload = {"request_id": f"seed-{offset//20}", "user_id": "load-user",
++                   "session_id": "load-session", "messages": [
++                       {"role": "user", "content": f"synthetic memory {offset+i} alpha marker"}
++                       for i in range(min(20, args.records-offset))]}
++        while True:
++            status, body, latency = request(args.url, "/add", payload)
++            if status == 0 and startup_retries < 30:
++                startup_retries += 1
++                time.sleep(.2)
++                continue
++            if status != 429:
++                break
++            seed_retries += 1
++            time.sleep(.15)
++        seed_latencies.append(latency)
++        if status != 200: raise RuntimeError(f"seed failed: {status} {body[:200]!r}")
++    app_id = subprocess.check_output([*compose, "ps", "-q", "app"], text=True).strip()
++    rebuilds_before_warm = event_count(container_logs(app_id), "index_rebuild")
++    warm = [request(args.url, "/search", {"query": "alpha marker", "user_id": "load-user", "top_k": 100})
++            for _ in range(10)]
++    warm_search_rebuild_delta = event_count(container_logs(app_id), "index_rebuild") - rebuilds_before_warm
++    time.sleep(args.settle_seconds)
++    outcomes: list[tuple[str, int, bytes, float, str | None]] = []
++    load_started = time.perf_counter()
++    with ResourceMonitor(ids) as monitor:
++        for burst in range(args.bursts):
++            def invoke(index: int):
++                if index < 16:
++                    content = f"capacity visibility {burst} {index}"
++                    status, body, latency = request(args.url, "/add", {
++                        "request_id": f"capacity-{burst}-{index}", "user_id": "load-user",
++                        "session_id": "load-session", "messages": [{"role": "user", "content": content}]})
++                    return "add", status, body, latency, content
++                status, body, latency = request(args.url, "/search", {
++                    "query": "alpha marker", "user_id": "load-user", "top_k": 100})
++                return "search", status, body, latency, None
++            with ThreadPoolExecutor(max_workers=32) as pool:
++                outcomes.extend(pool.map(invoke, range(32)))
++    load_seconds = time.perf_counter() - load_started
++    committed = [item[4] for item in outcomes if item[0] == "add" and item[1] == 200]
++    visibility_failures = 0
++    for content in committed:
++        status, body, _ = request(args.url, "/search", {"query": content, "user_id": "load-user", "top_k": 100})
++        rows = json.loads(body).get("data", []) if status == 200 else []
++        visibility_failures += not any(row.get("content") == content for row in rows)
++    replay_payload = {"request_id": "global-idempotency", "user_id": "isolation-a", "session_id": "s",
++                      "messages": [{"role": "user", "content": "private isolation marker"}]}
++    idem = [request(args.url, "/add", replay_payload)[0], request(args.url, "/add", replay_payload)[0]]
++    conflict = request(args.url, "/add", replay_payload | {"user_id": "isolation-b"})[0]
++    isolated_status, isolated_body, _ = request(args.url, "/search", {
++        "query": "private isolation marker", "user_id": "isolation-b", "top_k": 100})
++    isolated_rows = json.loads(isolated_body).get("data", []) if isolated_status == 200 else None
++    pre_restart_events = []
++    for line in container_logs(app_id):
++        start = line.find("{")
++        if start >= 0:
++            try: pre_restart_events.append(json.loads(line[start:]))
++            except json.JSONDecodeError: pass
++    cache_metrics = next((event for event in reversed(pre_restart_events)
++                          if event.get("event") == "policy_partition_cache"), {})
++    cache_metrics.pop("event", None)
++    restart_started = time.perf_counter(); subprocess.run([*compose, "restart", "app"], check=True, capture_output=True)
++    deadline = time.monotonic() + 90
++    while time.monotonic() < deadline:
++        if request(args.url, "/health")[0] == 200: break
++        time.sleep(.5)
++    restart_ms = (time.perf_counter() - restart_started) * 1000
++    recovery = request(args.url, "/search", {"query": "alpha marker", "user_id": "load-user", "top_k": 100})
++    app_id = subprocess.check_output([*compose, "ps", "-q", "app"], text=True).strip()
++    logs = container_logs(app_id)
++    events = []
++    for line in logs:
++        start = line.find("{")
++        if start >= 0:
++            try: events.append(json.loads(line[start:]))
++            except json.JSONDecodeError: pass
++    queue = [float(event["duration_ms"]) for event in events if event.get("event") == "queue_wait"]
++    report = {
++        "records": args.records, "bursts": args.bursts,
++        "seed": pct(seed_latencies), "seed_429_retries": seed_retries,
++        "proxy_startup_retries": startup_retries,
++        "warm_search": pct([item[2] for item in warm]),
++        "mixed_add": pct([item[3] for item in outcomes if item[0] == "add"]),
++        "mixed_search": pct([item[3] for item in outcomes if item[0] == "search"]),
++        "http_distribution": dict(Counter(item[1] for item in outcomes)),
++        "error_attribution": dict(Counter(classify(item[1], item[2]) for item in outcomes)),
++        "throughput_rps": round(len(outcomes)/load_seconds, 3),
++        "queue_wait": pct(queue) if queue else None,
++        "index_rebuild_events": sum(event.get("event") == "index_rebuild" for event in events),
++        "index_rebuild_details": [
++            {"duration_ms": event.get("duration_ms"), "recovery": event.get("recovery")}
++            for event in events if event.get("event") == "index_rebuild"
++        ],
++        "warm_search_rebuild_delta": warm_search_rebuild_delta,
++        "sqlite_contention_events": sum("locked" in line.lower() or "busy" in line.lower() for line in logs),
++        "committed_adds_checked": len(committed), "visibility_failures": visibility_failures,
++        "idempotency_statuses": idem, "global_conflict_status": conflict,
++        "cross_user_isolation_rows": isolated_rows,
++        "restart_ms": round(restart_ms, 3), "recovery_status": recovery[0],
++        "policy_partition_cache": cache_metrics,
++        "resources_by_container_id": monitor.samples,
++    }
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True)+"\n")
++    print(json.dumps(report, indent=2, sort_keys=True))
++
++
++if __name__ == "__main__": main()
+diff --git a/benchmarks/run_aml09b1_matrix.py b/benchmarks/run_aml09b1_matrix.py
+new file mode 100644
+index 0000000..ed136ae
+--- /dev/null
++++ b/benchmarks/run_aml09b1_matrix.py
+@@ -0,0 +1,75 @@
++"""Orchestrate disposable AML-09B.1 Linux Compose load configurations."""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import subprocess
++import time
++from pathlib import Path
++
++
++def run(command: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(command, check=True, env=env, text=True)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--records", type=int, choices=(3000, 10000), required=True)
++    parser.add_argument("--concurrency", type=int, choices=(4, 8, 16, 32), required=True)
++    parser.add_argument("--port", type=int, default=18443)
++    parser.add_argument("--uvicorn", type=int, default=40)
++    parser.add_argument("--nginx-rate", default="64r/s")
++    parser.add_argument("--nginx-burst", type=int, default=64)
++    parser.add_argument("--nginx-connections", type=int, default=40)
++    parser.add_argument("--label", default="candidate")
++    parser.add_argument("--settle-seconds", type=float, default=0)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++
++    project = f"aml09b1-{args.label}-{args.records}-c{args.concurrency}"
++    compose_file = Path("deploy/aml09b1/compose.yaml")
++    compose = ["docker", "compose", "-f", str(compose_file), "-p", project]
++    env = os.environ | {
++        "AML_APP_CONCURRENCY": str(args.concurrency),
++        "AML_UVICORN_LIMIT": str(args.uvicorn),
++        "AML_NGINX_RATE": args.nginx_rate,
++        "AML_NGINX_BURST": str(args.nginx_burst),
++        "AML_NGINX_CONNECTIONS": str(args.nginx_connections),
++        "AML_HOST_PORT": str(args.port),
++    }
++    started = time.perf_counter()
++    try:
++        run([*compose, "up", "-d", "--no-build"], env=env)
++        cold_start_ms = (time.perf_counter() - started) * 1000
++        roles = {
++            role: subprocess.check_output([*compose, "ps", "-q", role], env=env, text=True).strip()
++            for role in ("app", "proxy")
++        }
++        run([
++            "python3", "benchmarks/aml09b1_e2e.py", "--records", str(args.records),
++            "--project", project, "--compose", str(compose_file), "--output", str(args.output),
++            "--url", f"https://127.0.0.1:{args.port}",
++            "--settle-seconds", str(args.settle_seconds),
++        ], env=env)
++        volume = f"{project}_aml09b1_state"
++        mount = subprocess.check_output(
++            ["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", volume], text=True
++        ).strip()
++        disk_bytes = int(subprocess.check_output(["du", "-sb", mount], text=True).split()[0])
++        report = json.loads(args.output.read_text())
++        report.update({
++            "settings": {"application": args.concurrency, "uvicorn": args.uvicorn,
++                         "nginx_rate": args.nginx_rate, "nginx_burst": args.nginx_burst,
++                         "nginx_connections": args.nginx_connections},
++            "cold_start_ms": round(cold_start_ms, 3),
++            "state_disk_bytes": disk_bytes,
++            "container_roles": roles,
++        })
++        args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
++    finally:
++        subprocess.run([*compose, "down", "-v", "--remove-orphans"], env=env, check=False)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09c_retrieval_eval.py b/benchmarks/aml09c_retrieval_eval.py
+new file mode 100644
+index 0000000..e59c0a4
+--- /dev/null
++++ b/benchmarks/aml09c_retrieval_eval.py
+@@ -0,0 +1,110 @@
++"""Frozen, model-free AML-09C retrieval evaluation (public + synthetic data)."""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import math
++import random
++from collections import defaultdict
++from datetime import datetime, timezone
++from pathlib import Path
++from statistics import mean
++from uuid import NAMESPACE_URL, uuid5
++
++from syune.core import Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (AccessContext, InMemoryReferenceRepository, Observation, Principal,
++                          Provenance, SecurityEnvelope, Source, TruthMetadata, TruthState)
++from syune.retrieval import InvertedSeedIndex, QueryMode, RecallCue, RecallRequest, RetrievalService
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++KS = (1, 5, 10, 100)
++METRICS = tuple([f"recall@{k}" for k in KS] + [f"precision@{k}" for k in KS]
++                + ["mrr", "ndcg", "empty", "false_positive_rate"])
++
++
++def dt(value: str | None) -> datetime | None:
++    return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
++
++
++def score_query(ranked: list[str], relevant: set[str], acceptable: set[str]) -> dict[str, float]:
++    result: dict[str, float] = {}
++    for k in KS:
++        top = ranked[:k]
++        hits = len(set(top) & relevant)
++        result[f"recall@{k}"] = hits / len(relevant) if relevant else float(not top)
++        result[f"precision@{k}"] = len(set(top) & (relevant | acceptable)) / k
++    result["mrr"] = next((1 / rank for rank, item in enumerate(ranked, 1) if item in relevant), 0.0)
++    ideal = sum(1 / math.log2(rank + 1) for rank in range(1, len(relevant) + 1))
++    dcg = sum(1 / math.log2(rank + 1) for rank, item in enumerate(ranked, 1) if item in relevant)
++    result["ndcg"] = dcg / ideal if ideal else float(not ranked)
++    result["empty"] = float(not ranked)
++    result["false_positive_rate"] = (len(set(ranked) - relevant - acceptable) / len(ranked)) if ranked else 0.0
++    return result
++
++
++def aggregate(rows: list[dict[str, float]]) -> dict[str, float]:
++    return {key: round(mean(row[key] for row in rows), 6) for key in METRICS} if rows else {}
++
++
++def bootstrap(rows: list[dict[str, float]], key: str) -> dict[str, float]:
++    rng = random.Random(90210)
++    values = sorted(mean(rng.choice(rows)[key] for _ in rows) for _ in range(1000))
++    return {"low": round(values[24], 6), "high": round(values[974], 6)}
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--dataset", type=Path, default=Path("benchmarks/data/aml09c_retrieval_v1.json"))
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--label", required=True)
++    args = parser.parse_args()
++    raw = args.dataset.read_bytes(); dataset = json.loads(raw)
++    repo = InMemoryReferenceRepository()
++    source = Source(SourceId(uuid5(NAMESPACE_URL, "aml09c-source")), "evaluation", "aml09c-v1", NOW)
++    repo.put(source); ids = {}
++    for doc in dataset["documents"]:
++        oid = ObservationId(uuid5(NAMESPACE_URL, f"aml09c:{doc['id']}")); ids[doc["id"]] = oid
++        security = SecurityEnvelope(owner=doc["owner"]) if doc.get("owner") else None
++        truth = TruthMetadata(TruthState.VERIFIED, recorded_at=NOW,
++                              valid_from=dt(doc.get("valid_from")), valid_until=dt(doc.get("valid_until")))
++        repo.put(Observation(oid, doc["text"], "text",
++            Provenance(ProvenanceId(uuid5(NAMESPACE_URL, f"aml09c-prov:{doc['id']}")), source.id, NOW),
++            dt(doc.get("valid_from")) or NOW, NOW, Confidence(1), truth, security=security))
++    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
++    details = []
++    for query in dataset["queries"]:
++        access = None
++        if query.get("principal"):
++            principal = Principal(query["principal"], "aml09c")
++            access = AccessContext(principal, "evaluation", legacy_local_compatible=False)
++        cue = RecallCue(text=query["text"], query_mode=QueryMode(query.get("mode", "CURRENT")),
++                        valid_at=dt(query.get("valid_at")),
++                        access_context=access)
++        result = service.recall(RecallRequest(cue, max_results=100))
++        reverse = {value: key for key, value in ids.items()}
++        ranked = [reverse[item.entity_id] for item in result.candidates if item.entity_id in reverse]
++        relevant, acceptable = set(query["relevant"]), set(query.get("acceptable", ()))
++        scores = score_query(ranked, relevant, acceptable)
++        forbidden = set(query.get("forbidden", ())) & set(ranked)
++        details.append({"id": query["id"], "split": query["split"], "category": query["category"],
++                        "ranked": ranked, "forbidden": sorted(forbidden), **scores})
++    by_split = {}
++    for split in ("development", "heldout"):
++        rows = [row for row in details if row["split"] == split]
++        by_split[split] = aggregate(rows)
++        by_split[split]["recall@5_ci95"] = bootstrap(rows, "recall@5")
++        by_split[split]["mrr_ci95"] = bootstrap(rows, "mrr")
++    categories = {category: aggregate([row for row in details if row["split"] == "heldout" and row["category"] == category])
++                  for category in sorted({row["category"] for row in details if row["split"] == "heldout"})}
++    report = {"label": args.label, "dataset_version": dataset["version"],
++              "dataset_sha256": hashlib.sha256(raw).hexdigest(), "queries": len(details),
++              "model_free": True, "splits": by_split, "heldout_by_category": categories,
++              "forbidden_result_count": sum(len(row["forbidden"]) for row in details), "details": details}
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
++    print(json.dumps(report, indent=2, sort_keys=True))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09c_compare.py b/benchmarks/aml09c_compare.py
+new file mode 100644
+index 0000000..b3af711
+--- /dev/null
++++ b/benchmarks/aml09c_compare.py
+@@ -0,0 +1,38 @@
++"""Paired comparison for frozen AML-09C retrieval reports."""
++from __future__ import annotations
++import argparse, json, random
++from pathlib import Path
++from statistics import mean
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--baseline", type=Path, required=True)
++    parser.add_argument("--improved", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    baseline, improved = json.loads(args.baseline.read_text()), json.loads(args.improved.read_text())
++    assert baseline["dataset_sha256"] == improved["dataset_sha256"]
++    before = {row["id"]: row for row in baseline["details"] if row["split"] == "heldout"}
++    after = {row["id"]: row for row in improved["details"] if row["split"] == "heldout"}
++    assert before.keys() == after.keys()
++    metrics = ("recall@1", "recall@5", "recall@10", "recall@100", "precision@1",
++               "precision@5", "precision@10", "precision@100", "mrr", "ndcg",
++               "empty", "false_positive_rate")
++    rng = random.Random(90210); ids = sorted(before)
++    result = {}
++    for metric in metrics:
++        deltas = [after[key][metric] - before[key][metric] for key in ids]
++        samples = sorted(mean(rng.choice(deltas) for _ in deltas) for _ in range(5000))
++        result[metric] = {"baseline": round(mean(before[key][metric] for key in ids), 6),
++                          "improved": round(mean(after[key][metric] for key in ids), 6),
++                          "delta": round(mean(deltas), 6),
++                          "delta_ci95": {"low": round(samples[124], 6),
++                                         "high": round(samples[4874], 6)}}
++    report = {"dataset_sha256": baseline["dataset_sha256"], "heldout_queries": len(ids),
++              "paired_bootstrap_samples": 5000, "metrics": result}
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
++    print(json.dumps(report, indent=2, sort_keys=True))
++
++
++if __name__ == "__main__": main()
+diff --git a/benchmarks/aml09d_generate_eval.py b/benchmarks/aml09d_generate_eval.py
+new file mode 100644
+index 0000000..10c2d02
+--- /dev/null
++++ b/benchmarks/aml09d_generate_eval.py
+@@ -0,0 +1,86 @@
++"""Generate the frozen, independently synthetic AML-09D retrieval corpus."""
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++
++def main() -> None:
++    cities = ("Alderwick", "Brindleford", "Copperhaven", "Dunmere", "Eastridge")
++    vehicles = ("automobile", "roadster", "pickup", "van", "wagon")
++    engines = ("Aquila", "Boreas", "Cirrus", "Draco", "Eurus")
++    suppliers = ("Kestrel", "Lattice", "Meridian", "Northstar", "Oriole")
++    documents: list[dict[str, object]] = []
++    queries: list[dict[str, object]] = []
++    for number in range(40):
++        cluster = f"source-{number:02d}"
++        project = f"Project-{chr(65 + number // 10)}{number:02d}"
++        city = cities[number % len(cities)]
++        vehicle = vehicles[(number + 1) % len(vehicles)]
++        engine = engines[(number + 2) % len(engines)]
++        old_supplier = suppliers[(number + 3) % len(suppliers)] + f"-{number:02d}"
++        new_supplier = suppliers[(number + 4) % len(suppliers)] + f"-{number:02d}"
++        prefix = f"d{number:02d}"
++        documents.extend([
++            {"id": f"{prefix}-location", "cluster": cluster,
++             "text": f"{project} operates from {city}."},
++            {"id": f"{prefix}-vehicle", "cluster": cluster,
++             "text": f"{project} selected a {vehicle} for field transport."},
++            {"id": f"{prefix}-engine", "cluster": cluster,
++             "text": f"{project} uses the {engine} propulsion engine."},
++            {"id": f"{prefix}-supplier-old", "cluster": cluster,
++             "text": f"{old_supplier} supplied components to {project}.",
++             "valid_from": "2022-01-01T00:00:00Z", "valid_until": "2022-12-31T23:59:59Z"},
++            {"id": f"{prefix}-supplier-new", "cluster": cluster,
++             "text": f"{new_supplier} supplies components to {project}.",
++             "valid_from": "2024-01-01T00:00:00Z"},
++            {"id": f"{prefix}-distractor", "cluster": cluster,
++             "text": f"{project} publishes a quarterly maintenance schedule."},
++        ])
++        queries.extend([
++            {"id": f"q{number:02d}-factual", "cluster": cluster, "category": "factual",
++             "text": f"Which city is the operating base for {project}?",
++             "relevant": [f"{prefix}-location"]},
++            {"id": f"q{number:02d}-paraphrase", "cluster": cluster, "category": "paraphrase",
++             "text": f"What automobile was selected by {project}?",
++             "relevant": [f"{prefix}-vehicle"]},
++            {"id": f"q{number:02d}-compositional", "cluster": cluster, "category": "compositional",
++             "text": f"Return {project}'s operating city together with its propulsion engine.",
++             "relevant": [f"{prefix}-location", f"{prefix}-engine"]},
++            {"id": f"q{number:02d}-temporal-current", "cluster": cluster, "category": "temporal",
++             "text": f"Who is {project}'s current component supplier?",
++             "valid_at": "2025-01-01T00:00:00Z", "relevant": [f"{prefix}-supplier-new"],
++             "forbidden": [f"{prefix}-supplier-old"]},
++            {"id": f"q{number:02d}-temporal-history", "cluster": cluster, "category": "temporal",
++             "text": f"Which supplier served {project} during 2022?", "mode": "HISTORICAL",
++             "valid_at": "2022-06-01T00:00:00Z", "relevant": [f"{prefix}-supplier-old"],
++             "forbidden": [f"{prefix}-supplier-new"]},
++        ])
++        if number % 4 == 0:
++            queries.append({"id": f"q{number:02d}-irrelevant", "cluster": cluster,
++                            "category": "irrelevant", "text": f"What lunar cipher belongs to {project}?",
++                            "relevant": []})
++        if number % 5 == 0:
++            secret = f"{prefix}-secret"
++            documents.append({"id": secret, "cluster": cluster, "owner": "alice",
++                              "text": f"{project} private access code is Quartz-{number:02d}."})
++            queries.append({"id": f"q{number:02d}-authorization", "cluster": cluster,
++                            "category": "authorization", "principal": "bob",
++                            "text": f"What is the private access code for {project}?",
++                            "relevant": [], "forbidden": [secret]})
++    dataset = {
++        "version": "aml09d-independent-v1",
++        "provenance": "Deterministically generated synthetic facts; no AML/private evaluator material.",
++        "generation_seed": "fixed-enumeration-v1",
++        "clusters": 40,
++        "documents": documents,
++        "queries": queries,
++    }
++    output = Path("benchmarks/data/aml09d_independent_v1.json")
++    output.parent.mkdir(parents=True, exist_ok=True)
++    output.write_text(json.dumps(dataset, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(f"wrote {len(documents)} documents, {len(queries)} queries, 40 clusters")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09d_independent_eval.py b/benchmarks/aml09d_independent_eval.py
+new file mode 100644
+index 0000000..235e756
+--- /dev/null
++++ b/benchmarks/aml09d_independent_eval.py
+@@ -0,0 +1,124 @@
++"""Frozen cluster-aware AML-09D model-free retrieval evaluation."""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import math
++import random
++from collections import defaultdict
++from datetime import datetime, timezone
++from pathlib import Path
++from statistics import mean
++from uuid import NAMESPACE_URL, uuid5
++
++from syune.core import Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (AccessContext, InMemoryReferenceRepository, Observation, Principal,
++                          Provenance, SecurityEnvelope, Source, TruthMetadata, TruthState)
++from syune.retrieval import InvertedSeedIndex, QueryMode, RecallCue, RecallRequest, RetrievalService
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++KS = (1, 5, 10, 100)
++METRICS = tuple([f"recall@{k}" for k in KS] + [f"precision@{k}" for k in KS]
++                + ["mrr", "ndcg", "empty_result_rate", "false_positive_rate"])
++
++
++def dt(value: str | None) -> datetime | None:
++    return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
++
++
++def score(ranked: list[str], relevant: set[str]) -> dict[str, float]:
++    row: dict[str, float] = {}
++    for k in KS:
++        top = ranked[:k]
++        hits = len(set(top) & relevant)
++        row[f"recall@{k}"] = hits / len(relevant) if relevant else float(not top)
++        row[f"precision@{k}"] = hits / k
++    row["mrr"] = next((1 / rank for rank, item in enumerate(ranked, 1) if item in relevant), 0.0)
++    ideal = sum(1 / math.log2(rank + 1) for rank in range(1, len(relevant) + 1))
++    dcg = sum(1 / math.log2(rank + 1) for rank, item in enumerate(ranked, 1) if item in relevant)
++    row["ndcg"] = dcg / ideal if ideal else float(not ranked)
++    row["empty_result_rate"] = float(not ranked)
++    row["false_positive_rate"] = (len(set(ranked) - relevant) / len(ranked)) if ranked else 0.0
++    return row
++
++
++def aggregate(rows: list[dict[str, object]]) -> dict[str, float]:
++    return {key: round(mean(float(row[key]) for row in rows), 6) for key in METRICS}
++
++
++def clustered_ci(rows: list[dict[str, object]], metric: str) -> dict[str, float]:
++    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
++    for row in rows:
++        grouped[str(row["cluster"])].append(row)
++    clusters = sorted(grouped)
++    rng = random.Random(90401)
++    values = []
++    for _ in range(5000):
++        sample = [item for _ in clusters for item in grouped[rng.choice(clusters)]]
++        values.append(mean(float(item[metric]) for item in sample))
++    values.sort()
++    return {"low": round(values[124], 6), "high": round(values[4874], 6)}
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--dataset", type=Path, default=Path("benchmarks/data/aml09d_independent_v1.json"))
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--label", required=True)
++    args = parser.parse_args()
++    raw = args.dataset.read_bytes()
++    dataset = json.loads(raw)
++    repo = InMemoryReferenceRepository()
++    source = Source(SourceId(uuid5(NAMESPACE_URL, "aml09d-source")), "evaluation", "aml09d-v1", NOW)
++    repo.put(source)
++    ids: dict[str, ObservationId] = {}
++    for doc in dataset["documents"]:
++        oid = ObservationId(uuid5(NAMESPACE_URL, f"aml09d:{doc['id']}"))
++        ids[doc["id"]] = oid
++        repo.put(Observation(
++            oid, doc["text"], "text",
++            Provenance(ProvenanceId(uuid5(NAMESPACE_URL, f"aml09d-prov:{doc['id']}")), source.id, NOW),
++            dt(doc.get("valid_from")) or NOW, NOW, Confidence(1),
++            TruthMetadata(TruthState.VERIFIED, recorded_at=NOW,
++                          valid_from=dt(doc.get("valid_from")), valid_until=dt(doc.get("valid_until"))),
++            security=SecurityEnvelope(owner=doc["owner"]) if doc.get("owner") else None,
++        ))
++    index = InvertedSeedIndex(repo)
++    index.rebuild()
++    service = RetrievalService(repo, index)
++    reverse = {value: key for key, value in ids.items()}
++    details: list[dict[str, object]] = []
++    for query in dataset["queries"]:
++        access = None
++        if query.get("principal"):
++            access = AccessContext(Principal(query["principal"], "aml09d"), "evaluation",
++                                   legacy_local_compatible=False)
++        cue = RecallCue(text=query["text"], query_mode=QueryMode(query.get("mode", "CURRENT")),
++                        valid_at=dt(query.get("valid_at")), access_context=access)
++        recalled = service.recall(RecallRequest(cue, max_results=100))
++        ranked = [reverse[item.entity_id] for item in recalled.candidates if item.entity_id in reverse]
++        forbidden = sorted(set(query.get("forbidden", ())) & set(ranked))
++        details.append({"id": query["id"], "cluster": query["cluster"],
++                        "category": query["category"], "ranked": ranked,
++                        "forbidden": forbidden, **score(ranked, set(query["relevant"]))})
++    categories = {category: aggregate([row for row in details if row["category"] == category])
++                  for category in sorted({str(row["category"]) for row in details})}
++    overall = aggregate(details)
++    overall["recall@5_cluster_ci95"] = clustered_ci(details, "recall@5")
++    overall["mrr_cluster_ci95"] = clustered_ci(details, "mrr")
++    report = {"label": args.label, "dataset_version": dataset["version"],
++              "dataset_sha256": hashlib.sha256(raw).hexdigest(),
++              "documents": len(dataset["documents"]), "queries": len(details),
++              "clusters": dataset["clusters"], "model_free": True,
++              "bootstrap": {"unit": "source cluster", "samples": 5000},
++              "overall": overall, "by_category": categories,
++              "forbidden_result_count": sum(len(row["forbidden"]) for row in details),
++              "details": details}
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps({key: report[key] for key in report if key != "details"}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09d_compare.py b/benchmarks/aml09d_compare.py
+new file mode 100644
+index 0000000..7f3d764
+--- /dev/null
++++ b/benchmarks/aml09d_compare.py
+@@ -0,0 +1,49 @@
++"""Paired source-cluster bootstrap comparison for AML-09D reports."""
++from __future__ import annotations
++import argparse
++import json
++import random
++from collections import defaultdict
++from pathlib import Path
++from statistics import mean
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--baseline", type=Path, required=True)
++    parser.add_argument("--candidate", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    before_raw = json.loads(args.baseline.read_text(encoding="utf-8"))
++    after_raw = json.loads(args.candidate.read_text(encoding="utf-8"))
++    assert before_raw["dataset_sha256"] == after_raw["dataset_sha256"]
++    before = {row["id"]: row for row in before_raw["details"]}
++    after = {row["id"]: row for row in after_raw["details"]}
++    assert before.keys() == after.keys()
++    clusters: dict[str, list[str]] = defaultdict(list)
++    for key, row in before.items():
++        clusters[row["cluster"]].append(key)
++    cluster_ids = sorted(clusters)
++    metrics = ("recall@1", "recall@5", "recall@10", "recall@100", "precision@1",
++               "precision@5", "precision@10", "precision@100", "mrr", "ndcg",
++               "empty_result_rate", "false_positive_rate")
++    rng = random.Random(90401)
++    result = {}
++    for metric in metrics:
++        deltas = {cluster: mean(after[key][metric] - before[key][metric]
++                                        for key in clusters[cluster]) for cluster in cluster_ids}
++        samples = sorted(mean(deltas[rng.choice(cluster_ids)] for _ in cluster_ids) for _ in range(5000))
++        result[metric] = {"baseline": round(mean(before[key][metric] for key in before), 6),
++                          "candidate": round(mean(after[key][metric] for key in after), 6),
++                          "delta": round(mean(after[key][metric] - before[key][metric] for key in before), 6),
++                          "delta_cluster_ci95": {"low": round(samples[124], 6),
++                                                   "high": round(samples[4874], 6)}}
++    report = {"dataset_sha256": before_raw["dataset_sha256"], "queries": len(before),
++              "clusters": len(clusters), "paired_bootstrap_samples": 5000,
++              "bootstrap_unit": "source cluster", "metrics": result}
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps(report, indent=2, sort_keys=True))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09e_generate_eval.py b/benchmarks/aml09e_generate_eval.py
+new file mode 100644
+index 0000000..52d0308
+--- /dev/null
++++ b/benchmarks/aml09e_generate_eval.py
+@@ -0,0 +1,87 @@
++"""Generate AML-09E source-disjoint development and untouched final corpora."""
++from __future__ import annotations
++import json
++from pathlib import Path
++
++
++def main() -> None:
++    docs, queries = [], []
++    places = ("Cedarport", "Elmstead", "Foxhaven", "Glenmoor", "Highridge", "Ironbay")
++    states = ("amber", "blue", "coral", "green", "silver", "violet")
++    for number in range(48):
++        split = "development" if number < 24 else "final"
++        local = number if split == "development" else number - 24
++        cluster = f"{split}-source-{local:02d}"
++        entity = (f"Orchid-{local:02d}" if split == "development" else f"Helix-{local:02d}")
++        place, state = places[local % 6], states[(local + 2) % 6]
++        person = (f"Mira-{local:02d}" if split == "development" else f"Nila-{local:02d}")
++        material = ("titanium" if local % 2 == 0 else "ceramic")
++        p = f"{split[0]}{local:02d}"
++        if split == "development":
++            facts = [
++                ("place", f"{entity} headquarters is in {place}."),
++                ("person", f"{person} coordinates {entity}."),
++                ("material", f"{entity} uses a {material} housing."),
++                ("old", f"{entity} status was red.", "2022-01-01T00:00:00Z", "2022-12-31T23:59:59Z"),
++                ("new", f"{entity} status is {state}.", "2024-01-01T00:00:00Z", None),
++                ("noise", f"{entity} publishes monthly maintenance notes."),
++            ]
++            q = [
++                ("factual", f"Where is the headquarters of {entity}?", ["place"]),
++                ("paraphrase", f"Who manages {entity}?", ["person"]),
++                ("compositional", f"Return the headquarters and housing material for {entity}.", ["place", "material"]),
++                ("temporal-current", f"What is the current status of {entity}?", ["new"]),
++                ("temporal-history", f"What was the status of {entity} in 2022?", ["old"]),
++                ("irrelevant", f"What launch password belongs to {entity}?", []),
++            ]
++        else:
++            facts = [
++                ("place", f"{entity} keeps its base station at {place}."),
++                ("person", f"{person} is responsible for {entity}."),
++                ("material", f"{entity} has a {material} outer shell."),
++                ("old", f"{entity} phase was red.", "2022-01-01T00:00:00Z", "2022-12-31T23:59:59Z"),
++                ("new", f"{entity} phase is {state}.", "2024-01-01T00:00:00Z", None),
++                ("noise", f"{entity} issues routine service bulletins."),
++            ]
++            q = [
++                ("factual", f"Which base station belongs to {entity}?", ["place"]),
++                ("paraphrase", f"Who is the chief of {entity}?", ["person"]),
++                ("compositional", f"Return the base station and outer shell of {entity}.", ["place", "material"]),
++                ("temporal-current", f"What is the current phase of {entity}?", ["new"]),
++                ("temporal-history", f"What was the phase of {entity} in 2022?", ["old"]),
++                ("irrelevant", f"What encryption password belongs to {entity}?", []),
++            ]
++        ids = {}
++        for fact in facts:
++            kind, text, *validity = fact
++            doc = {"id": f"{p}-{kind}", "cluster": cluster, "split": split, "text": text}
++            if validity:
++                doc["valid_from"] = validity[0]
++                if validity[1]: doc["valid_until"] = validity[1]
++            docs.append(doc); ids[kind] = doc["id"]
++        for category, text, relevant in q:
++            query = {"id": f"q-{p}-{category}", "cluster": cluster, "split": split,
++                     "category": "temporal" if category.startswith("temporal") else category,
++                     "text": text, "relevant": [ids[item] for item in relevant]}
++            if category == "temporal-current":
++                query.update(valid_at="2025-01-01T00:00:00Z", forbidden=[ids["old"]])
++            if category == "temporal-history":
++                query.update(valid_at="2022-06-01T00:00:00Z", mode="HISTORICAL", forbidden=[ids["new"]])
++            queries.append(query)
++        if local % 6 == 0:
++            secret = {"id": f"{p}-secret", "cluster": cluster, "split": split, "owner": "alice",
++                      "text": f"{entity} confidential seal is Quartz-{local:02d}."}
++            docs.append(secret)
++            queries.append({"id": f"q-{p}-authorization", "cluster": cluster, "split": split,
++                            "category": "authorization", "principal": "bob",
++                            "text": f"What confidential seal belongs to {entity}?",
++                            "relevant": [], "forbidden": [secret["id"]]})
++    result = {"version": "aml09e-independent-v1", "clusters": 48,
++              "provenance": "Deterministically generated independent synthetic corpus; no AML/private material.",
++              "documents": docs, "queries": queries}
++    path = Path("benchmarks/data/aml09e_independent_v1.json")
++    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(f"documents={len(docs)} queries={len(queries)} clusters=48")
++
++
++if __name__ == "__main__": main()
+diff --git a/benchmarks/aml09e_eval.py b/benchmarks/aml09e_eval.py
+new file mode 100644
+index 0000000..55edb1d
+--- /dev/null
++++ b/benchmarks/aml09e_eval.py
+@@ -0,0 +1,49 @@
++"""Evaluate one frozen AML-09E split; final is run once after candidate selection."""
++from __future__ import annotations
++import argparse, hashlib, json, math, random
++from collections import defaultdict
++from datetime import datetime, timezone
++from pathlib import Path
++from statistics import mean
++from uuid import NAMESPACE_URL, uuid5
++from syune.core import Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (AccessContext, InMemoryReferenceRepository, Observation, Principal,
++                          Provenance, SecurityEnvelope, Source, TruthMetadata, TruthState)
++from syune.retrieval import InvertedSeedIndex, QueryMode, RecallCue, RecallRequest, RetrievalService
++
++NOW=datetime(2026,1,1,tzinfo=timezone.utc); KS=(1,5,10,100)
++METRICS=tuple([f"recall@{k}" for k in KS]+[f"precision@{k}" for k in KS]+["mrr","ndcg","empty_result_rate","false_positive_rate","abstention_accuracy","relevant_coverage"])
++def dt(value): return datetime.fromisoformat(value.replace("Z","+00:00")) if value else None
++def scored(ranked,relevant):
++    out={}; relevant=set(relevant)
++    for k in KS:
++        hits=len(set(ranked[:k])&relevant); out[f"recall@{k}"]=hits/len(relevant) if relevant else float(not ranked); out[f"precision@{k}"]=hits/k
++    out["mrr"]=next((1/i for i,x in enumerate(ranked,1) if x in relevant),0.0)
++    ideal=sum(1/math.log2(i+1) for i in range(1,len(relevant)+1)); dcg=sum(1/math.log2(i+1) for i,x in enumerate(ranked,1) if x in relevant)
++    out["ndcg"]=dcg/ideal if ideal else float(not ranked); out["empty_result_rate"]=float(not ranked)
++    out["false_positive_rate"]=len(set(ranked)-relevant)/len(ranked) if ranked else 0.0
++    out["abstention_accuracy"]=float((not ranked)==(not relevant)); out["relevant_coverage"]=float(bool(set(ranked)&relevant)) if relevant else 1.0
++    return out
++def aggregate(rows): return {m:round(mean(float(r[m]) for r in rows),6) for m in METRICS}
++def ci(rows,metric):
++    groups=defaultdict(list)
++    for row in rows: groups[row["cluster"]].append(row)
++    keys=sorted(groups); rng=random.Random(90501); vals=[]
++    for _ in range(5000):
++        sample=[r for _ in keys for r in groups[rng.choice(keys)]]; vals.append(mean(float(r[metric]) for r in sample))
++    vals.sort(); return {"low":round(vals[124],6),"high":round(vals[4874],6)}
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument("--dataset",type=Path,default=Path("benchmarks/data/aml09e_independent_v1.json")); ap.add_argument("--split",choices=("development","final"),required=True); ap.add_argument("--label",required=True); ap.add_argument("--output",type=Path,required=True); a=ap.parse_args()
++    raw=a.dataset.read_bytes(); data=json.loads(raw); repo=InMemoryReferenceRepository(); source=Source(SourceId(uuid5(NAMESPACE_URL,"aml09e")),"evaluation","v1",NOW); repo.put(source); ids={}
++    for d in data["documents"]:
++        oid=ObservationId(uuid5(NAMESPACE_URL,"aml09e:"+d["id"])); ids[d["id"]]=oid
++        repo.put(Observation(oid,d["text"],"text",Provenance(ProvenanceId(uuid5(NAMESPACE_URL,"aml09e-prov:"+d["id"])),source.id,NOW),dt(d.get("valid_from")) or NOW,NOW,Confidence(1),TruthMetadata(TruthState.VERIFIED,recorded_at=NOW,valid_from=dt(d.get("valid_from")),valid_until=dt(d.get("valid_until"))),security=SecurityEnvelope(owner=d["owner"]) if d.get("owner") else None))
++    index=InvertedSeedIndex(repo); index.rebuild(); service=RetrievalService(repo,index); reverse={v:k for k,v in ids.items()}; rows=[]
++    for q in (q for q in data["queries"] if q["split"]==a.split):
++        access=AccessContext(Principal(q["principal"],"aml09e"),"evaluation",legacy_local_compatible=False) if q.get("principal") else None
++        cue=RecallCue(text=q["text"],query_mode=QueryMode(q.get("mode","CURRENT")),valid_at=dt(q.get("valid_at")),access_context=access)
++        ranked=[reverse[x.entity_id] for x in service.recall(RecallRequest(cue,max_results=100)).candidates if x.entity_id in reverse]
++        rows.append({"id":q["id"],"cluster":q["cluster"],"category":q["category"],"ranked":ranked,"forbidden":sorted(set(q.get("forbidden",()))&set(ranked)),**scored(ranked,q["relevant"])})
++    report={"label":a.label,"split":a.split,"dataset_sha256":hashlib.sha256(raw).hexdigest(),"documents":len(data["documents"]),"queries":len(rows),"clusters":len({r["cluster"] for r in rows}),"bootstrap":{"unit":"source cluster","samples":5000},"overall":aggregate(rows),"by_category":{c:aggregate([r for r in rows if r["category"]==c]) for c in sorted({r["category"] for r in rows})},"recall@5_cluster_ci95":ci(rows,"recall@5"),"false_positive_rate_cluster_ci95":ci(rows,"false_positive_rate"),"forbidden_result_count":sum(len(r["forbidden"]) for r in rows),"details":rows}
++    a.output.parent.mkdir(parents=True,exist_ok=True); a.output.write_text(json.dumps(report,indent=2,sort_keys=True)+"\n"); print(json.dumps({k:v for k,v in report.items() if k!="details"},indent=2))
++if __name__=="__main__": main()
+diff --git a/benchmarks/aml09e_compare.py b/benchmarks/aml09e_compare.py
+new file mode 100644
+index 0000000..4e3b0e5
+--- /dev/null
++++ b/benchmarks/aml09e_compare.py
+@@ -0,0 +1,22 @@
++"""Paired source-cluster comparison for frozen AML-09E reports."""
++from __future__ import annotations
++import argparse, json, random
++from collections import defaultdict
++from pathlib import Path
++from statistics import mean
++
++METRICS=("recall@1","recall@5","recall@10","recall@100","precision@1","precision@5","precision@10","precision@100","mrr","ndcg","empty_result_rate","false_positive_rate","abstention_accuracy","relevant_coverage")
++def main():
++    ap=argparse.ArgumentParser(); ap.add_argument("--baseline",type=Path,required=True); ap.add_argument("--candidate",type=Path,required=True); ap.add_argument("--output",type=Path,required=True); a=ap.parse_args()
++    b=json.loads(a.baseline.read_text()); c=json.loads(a.candidate.read_text()); assert b["dataset_sha256"]==c["dataset_sha256"] and b["split"]==c["split"]
++    before={r["id"]:r for r in b["details"]}; after={r["id"]:r for r in c["details"]}; assert before.keys()==after.keys()
++    groups=defaultdict(list)
++    for key,row in before.items(): groups[row["cluster"]].append(key)
++    clusters=sorted(groups); rng=random.Random(90501); metrics={}
++    for metric in METRICS:
++        delta={g:mean(after[k][metric]-before[k][metric] for k in groups[g]) for g in clusters}
++        samples=sorted(mean(delta[rng.choice(clusters)] for _ in clusters) for _ in range(5000))
++        metrics[metric]={"baseline":round(mean(before[k][metric] for k in before),6),"candidate":round(mean(after[k][metric] for k in after),6),"delta":round(mean(after[k][metric]-before[k][metric] for k in before),6),"delta_cluster_ci95":{"low":round(samples[124],6),"high":round(samples[4874],6)}}
++    out={"dataset_sha256":b["dataset_sha256"],"split":b["split"],"queries":len(before),"clusters":len(clusters),"bootstrap_unit":"source cluster","paired_bootstrap_samples":5000,"metrics":metrics}
++    a.output.write_text(json.dumps(out,indent=2,sort_keys=True)+"\n"); print(json.dumps(out,indent=2,sort_keys=True))
++if __name__=="__main__": main()
+diff --git a/benchmarks/aml09f_generate_eval.py b/benchmarks/aml09f_generate_eval.py
+new file mode 100644
+index 0000000..2e9d44d
+--- /dev/null
++++ b/benchmarks/aml09f_generate_eval.py
+@@ -0,0 +1,37 @@
++"""Generate source-disjoint AML-09F paraphrase development/final data."""
++from __future__ import annotations
++import json
++from pathlib import Path
++
++
++def main() -> None:
++    docs=[]; queries=[]
++    cities=("Ashford","Brookmere","Clearwater","Daleside","Evermont","Fairhaven")
++    materials=("carbon","copper","granite","nickel","quartz","silicon")
++    for n in range(48):
++        split="development" if n<24 else "final"; i=n if n<24 else n-24
++        cluster=f"{split}-source-{i:02d}"; entity=(f"Nova-{i:02d}" if n<24 else f"Pulsar-{i:02d}")
++        person=(f"Ari-{i:02d}" if n<24 else f"Bea-{i:02d}"); old=f"Oldco-{i:02d}"; new=f"Newco-{i:02d}"; p=f"{split[0]}{i:02d}"
++        if split=="development":
++            facts={"manager":f"{person} supervises {entity}.","location":f"{entity} is situated in {cities[i%6]}.","material":f"{entity} chassis is made of {materials[i%6]}.","old":f"{old} provided components to {entity}.","new":f"{new} supplies components to {entity}.","noise":f"{entity} publishes a weekly service bulletin."}
++            qs=[("paraphrase-manager",f"Who manages {entity}?",["manager"]),("paraphrase-location",f"Where is {entity} located?",["location"]),("paraphrase-material",f"What material composes {entity}'s chassis?",["material"]),("temporal",f"Which provider served {entity} in 2022?",["old"]),("temporal",f"Which vendor currently serves {entity}?",["new"]),("compositional",f"Return the manager and location of {entity}.",["manager","location"]),("relation-change",f"Who owns {entity}?",[]),("irrelevant",f"What encryption password belongs to {entity}?",[])]
++        else:
++            facts={"manager":f"{person} coordinates {entity}.","location":f"{entity} headquarters stands in {cities[i%6]}.","material":f"{entity} outer shell consists of {materials[i%6]}.","old":f"{old} was the vendor for {entity}.","new":f"{new} provides components for {entity}.","noise":f"{entity} distributes routine maintenance circulars."}
++            qs=[("paraphrase-manager",f"Who oversees {entity}?",["manager"]),("paraphrase-location",f"Where is {entity} based?",["location"]),("paraphrase-material",f"What is the composition of {entity}'s outer shell?",["material"]),("temporal",f"Which supplier served {entity} during 2022?",["old"]),("temporal",f"Which provider serves {entity} now?",["new"]),("compositional",f"Return the coordinator and base of {entity}.",["manager","location"]),("relation-change",f"Who possesses {entity}?",[]),("irrelevant",f"What access password belongs to {entity}?",[])]
++        ids={}
++        for kind,text in facts.items():
++            d={"id":f"{p}-{kind}","cluster":cluster,"split":split,"text":text}
++            if kind=="old": d.update(valid_from="2022-01-01T00:00:00Z",valid_until="2022-12-31T23:59:59Z")
++            if kind=="new": d.update(valid_from="2024-01-01T00:00:00Z")
++            docs.append(d); ids[kind]=d["id"]
++        for j,(category,text,relevant) in enumerate(qs):
++            q={"id":f"q-{p}-{j}","cluster":cluster,"split":split,"category":category,"text":text,"relevant":[ids[x] for x in relevant]}
++            if category=="temporal" and relevant==["old"]: q.update(mode="HISTORICAL",valid_at="2022-06-01T00:00:00Z",forbidden=[ids["new"]])
++            if category=="temporal" and relevant==["new"]: q.update(valid_at="2025-01-01T00:00:00Z",forbidden=[ids["old"]])
++            queries.append(q)
++        if i%6==0:
++            secret={"id":f"{p}-secret","cluster":cluster,"split":split,"owner":"alice","text":f"{entity} confidential owner is Secret-{i:02d}."}; docs.append(secret)
++            queries.append({"id":f"q-{p}-auth","cluster":cluster,"split":split,"category":"authorization","principal":"bob","text":f"Who is the confidential owner of {entity}?","relevant":[],"forbidden":[secret["id"]]})
++    out={"version":"aml09f-independent-v1","clusters":48,"provenance":"Deterministic independent synthetic paraphrase corpus; no AML/private material.","documents":docs,"queries":queries}
++    path=Path("benchmarks/data/aml09f_independent_v1.json"); path.write_text(json.dumps(out,indent=2,sort_keys=True)+"\n"); print(f"documents={len(docs)} queries={len(queries)}")
++if __name__=="__main__": main()
+diff --git a/benchmarks/aml09g_compare.py b/benchmarks/aml09g_compare.py
+new file mode 100644
+index 0000000..5ccc6cb
+--- /dev/null
++++ b/benchmarks/aml09g_compare.py
+@@ -0,0 +1,48 @@
++"""Paired query-level comparison for frozen AML-09G SciFact reports."""
++from __future__ import annotations
++
++import argparse
++import json
++import random
++from pathlib import Path
++from statistics import mean
++
++METRICS = ("recall@1", "recall@5", "recall@10", "recall@100", "precision@1", "precision@5", "precision@10", "precision@100", "mrr", "ndcg", "empty_result_rate")
++
++
++def compare(left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
++    left_rows = {str(row["id"]): row for row in left["details"]}
++    right_rows = {str(row["id"]): row for row in right["details"]}
++    ids = sorted(set(left_rows) & set(right_rows))
++    rng = random.Random(90908)
++    output: dict[str, object] = {}
++    for metric in METRICS:
++        deltas = [float(right_rows[key][metric]) - float(left_rows[key][metric]) for key in ids]
++        samples = sorted(mean(rng.choice(deltas) for _ in deltas) for _ in range(5000))
++        output[metric] = {
++            "delta": round(mean(deltas), 6),
++            "paired_bootstrap_ci95": {"low": round(samples[124], 6), "high": round(samples[4874], 6)},
++        }
++    return {"left": left["label"], "right": right["label"], "paired_queries": len(ids), "metrics": output}
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--baseline", type=Path, required=True)
++    parser.add_argument("--aml09e", type=Path, required=True)
++    parser.add_argument("--aml09f", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    reports = [json.loads(path.read_text(encoding="utf-8")) for path in (args.baseline, args.aml09e, args.aml09f)]
++    result = {
++        "bootstrap": {"unit": "paired query", "samples": 5000, "seed": 90908},
++        "baseline_to_aml09e": compare(reports[0], reports[1]),
++        "baseline_to_aml09f": compare(reports[0], reports[2]),
++        "aml09e_to_aml09f": compare(reports[1], reports[2]),
++    }
++    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps(result, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09g_scifact_eval.py b/benchmarks/aml09g_scifact_eval.py
+new file mode 100644
+index 0000000..744e7af
+--- /dev/null
++++ b/benchmarks/aml09g_scifact_eval.py
+@@ -0,0 +1,130 @@
++"""Frozen AML-09G evaluation on the public BEIR SciFact test split."""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import math
++import random
++from collections import defaultdict
++from datetime import datetime, timezone
++from pathlib import Path
++from statistics import mean
++from uuid import NAMESPACE_URL, uuid5
++
++from syune.core import Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import InMemoryReferenceRepository, Observation, Provenance, Source, TruthMetadata, TruthState
++from syune.retrieval import InvertedSeedIndex, QueryMode, RecallCue, RecallRequest, RetrievalService
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++KS = (1, 5, 10, 100)
++METRICS = tuple([f"recall@{k}" for k in KS] + [f"precision@{k}" for k in KS] + ["mrr", "ndcg", "empty_result_rate"])
++
++
++def sha256(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def load_jsonl(path: Path) -> list[dict[str, object]]:
++    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
++
++
++def score(ranked: list[str], relevant: set[str]) -> dict[str, float]:
++    row: dict[str, float] = {}
++    for k in KS:
++        hits = len(set(ranked[:k]) & relevant)
++        row[f"recall@{k}"] = hits / len(relevant)
++        row[f"precision@{k}"] = hits / k
++    row["mrr"] = next((1 / rank for rank, doc_id in enumerate(ranked, 1) if doc_id in relevant), 0.0)
++    ideal = sum(1 / math.log2(rank + 1) for rank in range(1, len(relevant) + 1))
++    dcg = sum(1 / math.log2(rank + 1) for rank, doc_id in enumerate(ranked, 1) if doc_id in relevant)
++    row["ndcg"] = dcg / ideal
++    row["empty_result_rate"] = float(not ranked)
++    return row
++
++
++def aggregate(rows: list[dict[str, object]]) -> dict[str, float]:
++    return {metric: round(mean(float(row[metric]) for row in rows), 6) for metric in METRICS}
++
++
++def bootstrap_ci(rows: list[dict[str, object]], metric: str) -> dict[str, float]:
++    rng = random.Random(90907)
++    values = sorted(mean(float(rng.choice(rows)[metric]) for _ in rows) for _ in range(5000))
++    return {"low": round(values[124], 6), "high": round(values[4874], 6)}
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--dataset", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    parser.add_argument("--label", required=True)
++    parser.add_argument("--benchmark", default="BEIR SciFact")
++    args = parser.parse_args()
++
++    corpus_path = args.dataset / "corpus.jsonl"
++    queries_path = args.dataset / "queries.jsonl"
++    qrels_path = args.dataset / "qrels" / "test.tsv"
++    corpus = load_jsonl(corpus_path)
++    queries = {str(q["_id"]): str(q["text"]) for q in load_jsonl(queries_path)}
++    qrels: dict[str, set[str]] = defaultdict(set)
++    for line in qrels_path.read_text(encoding="utf-8-sig").splitlines()[1:]:
++        query_id, corpus_id, score_value = line.split("\t")
++        if int(score_value) > 0:
++            qrels[query_id].add(corpus_id)
++
++    repo = InMemoryReferenceRepository()
++    source = Source(SourceId(uuid5(NAMESPACE_URL, "aml09g-beir-scifact")), "BEIR SciFact", "official-test", NOW)
++    repo.put(source)
++    ids: dict[str, ObservationId] = {}
++    for document in corpus:
++        doc_id = str(document["_id"])
++        oid = ObservationId(uuid5(NAMESPACE_URL, f"aml09g-scifact:{doc_id}"))
++        ids[doc_id] = oid
++        title = str(document.get("title", "")).strip()
++        body = str(document.get("text", "")).strip()
++        text = f"{title}. {body}" if title else body
++        repo.put(Observation(
++            oid, text, "text",
++            Provenance(ProvenanceId(uuid5(NAMESPACE_URL, f"aml09g-scifact-prov:{doc_id}")), source.id, NOW),
++            NOW, NOW, Confidence(1), TruthMetadata(TruthState.VERIFIED, recorded_at=NOW),
++        ))
++
++    index = InvertedSeedIndex(repo)
++    index.rebuild()
++    service = RetrievalService(repo, index)
++    reverse = {oid: doc_id for doc_id, oid in ids.items()}
++    rows: list[dict[str, object]] = []
++    for query_id in sorted(qrels):
++        recalled = service.recall(RecallRequest(
++            RecallCue(text=queries[query_id], query_mode=QueryMode.CURRENT), max_results=100,
++        ))
++        ranked = [reverse[item.entity_id] for item in recalled.candidates if item.entity_id in reverse]
++        rows.append({"id": query_id, "ranked": ranked, **score(ranked, qrels[query_id])})
++
++    overall = aggregate(rows)
++    ci95 = {metric: bootstrap_ci(rows, metric) for metric in ("recall@1", "recall@5", "mrr", "ndcg")}
++    report = {
++        "label": args.label,
++        "benchmark": args.benchmark,
++        "split": "test",
++        "dataset_files_sha256": {p.name: sha256(p) for p in (corpus_path, queries_path, qrels_path)},
++        "documents": len(corpus),
++        "queries": len(rows),
++        "qrels": sum(len(value) for value in qrels.values()),
++        "categories": {"factual_scientific_claim": len(rows), "paraphrase": None, "compositional": None, "temporal": None},
++        "bootstrap": {"unit": "query (benchmark exposes no source-cluster identifiers)", "samples": 5000, "seed": 90907},
++        "overall": overall,
++        "ci95": ci95,
++        "false_positive_rate": None,
++        "abstention_accuracy": None,
++        "unsupported_metric_reason": "SciFact test qrels are sparse and contain no explicit irrelevant or unanswerable-query labels.",
++        "model_free": True,
++        "details": rows,
++    }
++    args.output.parent.mkdir(parents=True, exist_ok=True)
++    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps({key: value for key, value in report.items() if key != "details"}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09k_profile.py b/benchmarks/aml09k_profile.py
+new file mode 100644
+index 0000000..6efc0be
+--- /dev/null
++++ b/benchmarks/aml09k_profile.py
+@@ -0,0 +1,98 @@
++"""Component profile for AML-09K; not a retrieval-quality harness."""
++from __future__ import annotations
++
++import argparse
++import json
++import tempfile
++from concurrent.futures import ThreadPoolExecutor
++from datetime import datetime, timezone
++from pathlib import Path
++from statistics import median
++from time import perf_counter
++
++from syune.core import Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (
++    AccessContext, Observation, Principal, Provenance, SecurityEnvelope,
++    Source, SQLiteMemoryRepository, authorize,
++)
++from syune.retrieval import InvertedSeedIndex, RecallCue, RecallRequest, RetrievalService
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++
++
++def measure(fn, repetitions: int = 7) -> dict[str, float]:
++    values = []
++    for _ in range(repetitions):
++        started = perf_counter(); fn(); values.append((perf_counter() - started) * 1000)
++    ordered = sorted(values)
++    return {"median_ms": round(median(values), 3), "min_ms": round(ordered[0], 3),
++            "max_ms": round(ordered[-1], 3)}
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--records", type=int, choices=(3000, 10000), required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    args = parser.parse_args()
++    with tempfile.TemporaryDirectory(prefix="aml09k-profile-") as directory:
++        repo = SQLiteMemoryRepository(Path(directory) / "memory.sqlite3")
++        source = Source(SourceId.new(), "synthetic", "aml09k-profile", NOW)
++        provenance = Provenance(ProvenanceId.new(), source.id, NOW)
++        repo.put(source)
++        envelope = SecurityEnvelope(owner="user:load-user")
++        for number in range(args.records):
++            repo.put(Observation(
++                ObservationId.new(), f"synthetic memory {number} alpha marker", "text",
++                provenance, NOW, NOW, Confidence(1), security=envelope,
++            ))
++        index = InvertedSeedIndex(repo); index.rebuild()
++        access = AccessContext(Principal("load-user", "aml"), legacy_local_compatible=False)
++        ids = tuple(index.entries)
++        eligible = lambda entity_id: index.request_eligible(
++            entity_id, access, valid_at=NOW, knowledge_at=NOW, current=True)
++
++        authorization = measure(lambda: [authorize(index.entries[item].security, access) for item in ids])
++        visible_corpus = measure(lambda: {item for item in ids if eligible(item)})
++        allowed = {item for item in ids if eligible(item)}
++        partition = index.policy_partition(access)
++        partition_hit = measure(lambda: index.policy_partition(access))
++        bm25 = measure(lambda: index.lexical(
++            "alpha marker", 32, eligible=allowed.__contains__, partition=partition))
++        semantic = measure(lambda: index.semantic("alpha marker", 32, eligible=allowed.__contains__))
++        repository = measure(lambda: [repo.get(item) for item in ids], 3)
++        service = RetrievalService(repo, index)
++        full_request = RecallRequest(RecallCue(text="alpha marker", access_context=access))
++        cold_started = perf_counter(); service.recall(full_request)
++        cold_full_ms = (perf_counter() - cold_started) * 1000
++        full = measure(lambda: service.recall(RecallRequest(RecallCue(
++            text="alpha marker", access_context=access,
++        ))), 5)
++
++        def concurrent_batch():
++            with ThreadPoolExecutor(max_workers=16) as pool:
++                tuple(pool.map(lambda _: index.lexical(
++                    "alpha marker", 32, eligible=allowed.__contains__), range(16)))
++
++        lock_batch = measure(concurrent_batch, 3)
++        report = {
++            "records": args.records,
++            "authorization_checks": authorization,
++            "visible_corpus_construction": visible_corpus,
++            "cached_partition_lookup": partition_hit,
++            "bm25_authorized_statistics_and_ranking": bm25,
++            "semantic_filter_and_overfetch": semantic,
++            "repository_get_all": repository,
++            "full_recall": full,
++            "cold_full_recall_ms": round(cold_full_ms, 3),
++            "policy_partition_cache": index.partition_metrics(),
++            "index_lock_16_search_batch": lock_batch,
++            "graph_endpoint_authorization_note": "covered by bounded activated graph; no graph in AML load fixture",
++            "index_generation": {"cursor": index.cursor, "lifecycle_cursor": index.lifecycle_cursor},
++        }
++        args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
++        print(json.dumps(report, indent=2, sort_keys=True))
++        repo.close()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/benchmarks/aml09k_graph_profile.py b/benchmarks/aml09k_graph_profile.py
+new file mode 100644
+index 0000000..53dc2ae
+--- /dev/null
++++ b/benchmarks/aml09k_graph_profile.py
+@@ -0,0 +1,62 @@
++"""Bounded graph authorization/repository microprofile for AML-09K."""
++from __future__ import annotations
++
++import json
++import argparse
++from datetime import datetime, timezone
++from statistics import median
++from time import perf_counter
++
++from syune.core import AssociationId, Confidence, ObservationId, ProvenanceId, SourceId
++from syune.memory import (
++    AccessContext, Association, InMemoryReferenceRepository, Observation, Principal,
++    Provenance, SecurityEnvelope, Source, authorize,
++)
++from syune.retrieval import InvertedSeedIndex
++
++NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
++
++
++def timed(fn):
++    values = []
++    for _ in range(31):
++        started = perf_counter(); fn(); values.append((perf_counter() - started) * 1000)
++    return {"median_ms": round(median(values), 4), "min_ms": round(min(values), 4),
++            "max_ms": round(max(values), 4)}
++
++
++repo = InMemoryReferenceRepository()
++source = Source(SourceId.new(), "synthetic", "aml09k-graph-profile", NOW)
++provenance = Provenance(ProvenanceId.new(), source.id, NOW); repo.put(source)
++security = SecurityEnvelope(owner="user:bob", agent_scope="agent-b")
++nodes = []
++for number in range(513):
++    item = Observation(ObservationId.new(), f"graph node {number}", "text", provenance,
++                       NOW, NOW, Confidence(1), security=security)
++    repo.put(item); nodes.append(item)
++for number in range(512):
++    repo.add_association(Association(AssociationId.new(), nodes[number].id, nodes[number + 1].id,
++                                     "associated_with", provenance, Confidence(1), NOW, 1.0))
++index = InvertedSeedIndex(repo); index.rebuild()
++access = AccessContext(Principal("bob", "agent-b"), legacy_local_compatible=False)
++edges = tuple(edge for node in nodes for edge in repo.associations_for(node.id))[:512]
++
++
++def authorize_endpoints():
++    for edge in edges:
++        assert authorize(index.entries[edge.source_id].security, access).allowed
++        assert authorize(index.entries[edge.target_id].security, access).allowed
++
++
++def repository_edges():
++    for node in nodes:
++        repo.associations_for(node.id)
++
++
++parser = argparse.ArgumentParser(); parser.add_argument("--output", required=True)
++args = parser.parse_args()
++report = {"edges": len(edges), "endpoint_authorization": timed(authorize_endpoints),
++          "repository_association_access": timed(repository_edges)}
++with open(args.output, "w", encoding="utf-8") as handle:
++    json.dump(report, handle, indent=2); handle.write("\n")
++print(json.dumps(report, indent=2))

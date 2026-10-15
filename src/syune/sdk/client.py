@@ -89,6 +89,9 @@ class Syune:
             raise SyuneError("INVALID_REQUEST", str(exc), ErrorCategory.INVALID_REQUEST) from None
 
     def close(self) -> None: self.__runtime.close()
+    def _fork_reader(self) -> "Syune":
+        """Internal lifecycle hook for bounded application-owned read pools."""
+        return type(self)(SyuneRuntime.reader(self.__runtime), self._mode, self._model_gateway)
     def __enter__(self) -> "Syune": return self
     def __exit__(self, *_: object) -> None: self.close()
 

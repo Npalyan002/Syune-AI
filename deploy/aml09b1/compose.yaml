@@ -1,0 +1,66 @@
+services:
+  app:
+    image: syune-aml09b1:local
+    build:
+      context: ../..
+      dockerfile: deploy/aml/Dockerfile
+    command: ["uvicorn", "syune.adapters.aml.v1:app_from_environment", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--limit-concurrency", "${AML_UVICORN_LIMIT:-40}", "--timeout-keep-alive", "5", "--timeout-graceful-shutdown", "120", "--log-config", "/etc/syune/logging.json", "--no-access-log", "--no-server-header"]
+    environment:
+      SYUNE_AML_STATE_ROOT: /var/lib/syune-aml
+      SYUNE_AML_BEARER_TOKEN_FILE: /run/secrets/aml_bearer_token
+      SYUNE_AML_MAX_BODY_BYTES: "1048576"
+      SYUNE_AML_MAX_CONCURRENCY: ${AML_APP_CONCURRENCY:-4}
+      SYUNE_AML_QUEUE_WAIT_SECONDS: ${AML_QUEUE_WAIT_SECONDS:-1}
+      SYUNE_AML_MIN_FREE_BYTES: "0"
+    secrets: [aml_bearer_token]
+    volumes:
+      - aml09b1_state:/var/lib/syune-aml
+      - ./logging.json:/etc/syune/logging.json:ro
+    expose: ["8080"]
+    read_only: true
+    mem_limit: ${AML_APP_MEMORY:-2g}
+    cpus: ${AML_APP_CPUS:-2.0}
+    pids_limit: 256
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 3m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=5).read()"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+    networks: [aml09b1]
+  proxy:
+    image: nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284
+    user: "101:101"
+    depends_on:
+      app: {condition: service_healthy}
+    command: ["/bin/sh", "-c", "envsubst '$$AML_NGINX_RATE $$AML_NGINX_BURST $$AML_NGINX_CONNECTIONS' < /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
+    environment:
+      AML_NGINX_RATE: ${AML_NGINX_RATE:-64r/s}
+      AML_NGINX_BURST: ${AML_NGINX_BURST:-64}
+      AML_NGINX_CONNECTIONS: ${AML_NGINX_CONNECTIONS:-40}
+    ports: ["127.0.0.1:${AML_HOST_PORT:-18443}:8443"]
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ${AML_TLS_CERT_FILE:?set local certificate path}:/run/tls/fullchain.pem:ro
+      - ${AML_TLS_KEY_FILE:?set local key path}:/run/tls/privkey.pem:ro
+    read_only: true
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 128
+    tmpfs:
+      - /var/cache/nginx:size=32m,uid=101,gid=101,mode=0700
+      - /var/run:size=8m,uid=101,gid=101,mode=0700
+      - /tmp:size=16m,uid=101,gid=101,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [aml09b1]
+volumes: {aml09b1_state: {}}
+networks: {aml09b1: {}}
+secrets:
+  aml_bearer_token:
+    file: ${AML_BEARER_TOKEN_FILE:?set dummy token file path}

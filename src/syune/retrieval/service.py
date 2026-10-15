@@ -16,7 +16,7 @@ from syune.memory import (
 from syune.memory.model import NodeId
 from syune.memory.repository import MemoryObject, MemoryRepository
 from .index import SeedIndex
-from .hybrid import RetrieverKind, analyze_query, reciprocal_rank_fusion
+from .hybrid import RetrieverKind, analyze_query, entity_terms, reciprocal_rank_fusion
 from .model import (
     NullPlasticityView, PlasticityView, RecallCandidate, RecallRequest, RecallResult, RetrievalConfig,
     RetrievalError, RetrievalErrorCode,
@@ -52,59 +52,170 @@ class RetrievalService:
         cue = request.cue
         analysis = analyze_query(cue.text, bool(cue.entity_ids or cue.source_ids or cue.context_ids))
         found_by: dict[NodeId, set[str]] = defaultdict(set)
+        discovery_generated = 0
+        discovery_admitted = 0
+        discovery_filtered = 0
+        query_now = utc_now()
+        valid_at = cue.valid_at or query_now
+        knowledge_at = cue.knowledge_at or query_now
+        visibility: dict[NodeId, tuple[bool, object | None]] = {}
+        eligibility: dict[NodeId, bool] = {}
+        partition = getattr(self.index, "policy_partition", lambda _: None)(cue.access_context)
 
-        def add_seed(entity_id: NodeId, value: float, reason: str) -> None:
+        def visible(entity_id: NodeId) -> tuple[bool, object | None]:
+            """Return request-consistent eligibility without exposing rejected nodes.
+
+            The runtime's reader lock keeps repository, policy, and index state stable for
+            the whole request.  The local cache gives direct service users the same
+            per-request decision and prevents a policy change from splitting a traversal.
+            """
+            cached = visibility.get(entity_id)
+            if cached is not None:
+                return cached
+            entity = self.memory.get(entity_id)
+            if entity is None:
+                result = (False, None)
+            elif hasattr(self.memory, "lifecycle") and (
+                self.memory.lifecycle(entity_id).state is not LifecycleState.ACTIVE
+                and not (cue.include_archived and self.memory.lifecycle(entity_id).state is LifecycleState.ARCHIVED)
+            ):
+                result = (False, None)
+            else:
+                provenance = getattr(entity, "provenance", None)
+                truth = getattr(entity, "truth", None)
+                provenance_valid = (provenance is None or self.memory.exists(provenance.source_id)
+                                    or truth is None or truth.recorded_at is None)
+                temporal_valid = (truth is None or temporally_eligible(
+                    truth, valid_at=valid_at, knowledge_at=knowledge_at,
+                    current=cue.query_mode is QueryMode.CURRENT,
+                    superseded_by_other=bool(getattr(self.index, "is_superseded", lambda _: False)(entity_id)),
+                ))
+                decision = authorize(getattr(entity, "security", None), cue.access_context)
+                result = (bool(provenance_valid and temporal_valid and decision.allowed), entity)
+                if not decision.allowed:
+                    principal_keys = tuple(sorted(cue.access_context.principal.keys)) \
+                        if cue.access_context and cue.access_context.principal else ()
+                    self.access_events.append(AccessAuditEvent(
+                        decision.code, principal_keys, entity_id,
+                        cue.access_context.purpose if cue.access_context else None, query_now,
+                    ))
+            visibility[entity_id] = result
+            return result
+
+        def add_seed(entity_id: NodeId, value: float, reason: str, *, explicit: bool = False) -> bool:
             if entity_id not in seeds and len(seeds) >= cfg.max_candidates:
                 truncated.add("candidates")
-                return
-            if not self.memory.exists(entity_id):
+                return False
+            allowed, entity = visible(entity_id)
+            if entity is None and explicit and cue.access_context is None:
                 raise RetrievalError(RetrievalErrorCode.MISSING_ENTITY, f"missing explicit/structural entity: {entity_id}")
-            if hasattr(self.memory,"lifecycle"):
-                state=self.memory.lifecycle(entity_id).state
-                if state is not LifecycleState.ACTIVE and not (cue.include_archived and state is LifecycleState.ARCHIVED): return
+            # With an access context, missing and inaccessible explicit resources are
+            # deliberately indistinguishable.  This closes direct-ID existence probes.
+            if not allowed:
+                return False
             seeds[entity_id] = max(seeds.get(entity_id, 0.0), value)
             reasons[entity_id].add(reason)
             if reason.startswith("lexical:"): found_by[entity_id].add(RetrieverKind.LEXICAL.value)
             elif reason in {"exact_id", "source_id", "context_id"}: found_by[entity_id].add(RetrieverKind.EXACT.value)
             elif reason.startswith("entity:"): found_by[entity_id].add(RetrieverKind.ENTITY.value)
             elif reason.startswith("semantic:"): found_by[entity_id].add(RetrieverKind.SEMANTIC.value)
+            return True
+
+        def eligible(entity_id: NodeId) -> bool:
+            if entity_id in eligibility:
+                return eligibility[entity_id]
+            snapshot_check = getattr(self.index, "request_eligible", None)
+            if snapshot_check is not None:
+                result = snapshot_check(
+                    entity_id, cue.access_context, valid_at=valid_at,
+                    knowledge_at=knowledge_at, current=cue.query_mode is QueryMode.CURRENT,
+                    partition=partition,
+                )
+            else:
+                result = visible(entity_id)[0]
+            eligibility[entity_id] = result
+            return result
 
         try:
             explicit = tuple(dict.fromkeys((*cue.entity_ids, *cue.context_ids)))
             if len(explicit) > cfg.max_explicit_seeds:
                 truncated.add("explicit_seeds")
             for entity_id in explicit[:cfg.max_explicit_seeds]:
-                add_seed(entity_id, 1.0, "context_id" if entity_id in cue.context_ids else "exact_id")
+                add_seed(entity_id, 1.0, "context_id" if entity_id in cue.context_ids else "exact_id", explicit=True)
             if len(cue.source_ids) > cfg.max_explicit_seeds:
                 truncated.add("explicit_seeds")
             for source_id in cue.source_ids[:cfg.max_explicit_seeds]:
-                add_seed(source_id, 1.0, "source_id")
-                for entity_id in self.index.source_ids(source_id, cfg.max_lexical_seeds):
+                add_seed(source_id, 1.0, "source_id", explicit=True)
+                for entity_id in self.index.source_ids(source_id, cfg.max_lexical_seeds, eligible=eligible):
                     add_seed(entity_id, 0.8, "source_provenance")
             if cue.text:
+                denied_matches = getattr(self.index, "denied_lexical_ids", lambda *_args, **_kwargs: ())(
+                    cue.text, cue.access_context, cfg.max_lexical_seeds,
+                )
+                principal_keys = tuple(sorted(cue.access_context.principal.keys)) \
+                    if cue.access_context and cue.access_context.principal else ()
+                for entity_id in denied_matches:
+                    entry = getattr(self.index, "entries", {}).get(entity_id)
+                    decision = authorize(getattr(entry, "security", None), cue.access_context)
+                    self.access_events.append(AccessAuditEvent(
+                        decision.code, principal_keys, entity_id,
+                        cue.access_context.purpose if cue.access_context else None, query_now,
+                    ))
+                anchors = set(entity_terms(cue.text))
+                predicates = set(analysis.tokens) - anchors
+                # Capitalization is reliable identity evidence in short relational
+                # questions, but not in long declarative claims (sentence starts,
+                # acronyms, and scientific names). Keep those regimes separate.
+                broad_claim = len(set(analysis.tokens)) >= 6
                 if RetrieverKind.EXACT in analysis.routes and hasattr(self.index, "exact"):
-                    for hit in self.index.exact(cue.text, cfg.max_lexical_seeds):
+                    for hit in self.index.exact(cue.text, cfg.max_lexical_seeds, eligible=eligible):
                         add_seed(hit.entity_id, 1.0, "exact:text")
                         found_by[hit.entity_id].add(RetrieverKind.EXACT.value)
                 if RetrieverKind.ENTITY in analysis.routes and hasattr(self.index, "entity"):
-                    for hit in self.index.entity(cue.text, cfg.max_lexical_seeds):
-                        coverage = len(set(hit.matched_tokens) & set(analysis.tokens)) / max(1, len(analysis.tokens))
-                        if coverage < 0.5 and not self.memory.associations_for(hit.entity_id):
+                    for hit in self.index.entity(cue.text, cfg.max_lexical_seeds, eligible=eligible):
+                        allowed, _ = visible(hit.entity_id)
+                        if not allowed:
                             continue
-                        add_seed(hit.entity_id, hit.score, "entity:name")
+                        discovery_generated += 1
+                        matched = set(hit.matched_tokens)
+                        # Entity routing proves identity only. A relational question must
+                        # also earn lexical predicate evidence before becoming a seed.
+                        if not anchors.issubset(matched) or predicates:
+                            discovery_filtered += 1
+                            continue
+                        if add_seed(hit.entity_id, hit.score, "entity:name"):
+                            discovery_admitted += 1
                 if RetrieverKind.LEXICAL in analysis.routes:
-                    for hit in self.index.lexical(cue.text, cfg.max_lexical_seeds):
-                        # Weak isolated overlap is noise; graph-linked seeds remain useful for multi-hop.
-                        coverage = len(hit.matched_tokens) / max(1, len(analysis.tokens))
-                        if coverage < 0.5 and not self.memory.associations_for(hit.entity_id):
+                    for hit in self.index.lexical(
+                        cue.text, cfg.max_lexical_seeds, eligible=eligible, partition=partition,
+                    ):
+                        allowed, _ = visible(hit.entity_id)
+                        if not allowed:
                             continue
-                        add_seed(hit.entity_id, hit.score, f"lexical:{hit.field}")
-                        lexical[hit.entity_id].update(hit.matched_tokens)
+                        discovery_generated += 1
+                        matched = set(hit.matched_tokens)
+                        coverage = len(matched) / max(1, len(set(analysis.tokens)))
+                        if anchors and not broad_claim:
+                            # An entity anchor without a matching predicate retrieves every
+                            # fact about that entity and is not sufficient relational evidence.
+                            if not anchors.issubset(matched) or (predicates and not predicates & matched):
+                                discovery_filtered += 1
+                                continue
+                        elif len(matched) < min(2, len(set(analysis.tokens))) and coverage < 0.5 \
+                                and not self.memory.associations_for(hit.entity_id):
+                            discovery_filtered += 1
+                            continue
+                        if add_seed(hit.entity_id, hit.score, f"lexical:{hit.field}"):
+                            lexical[hit.entity_id].update(hit.matched_tokens)
+                            discovery_admitted += 1
                 if RetrieverKind.SEMANTIC in analysis.routes and hasattr(self.index, "semantic"):
-                    for hit in self.index.semantic(cue.text, cfg.max_lexical_seeds):
+                    for hit in self.index.semantic(cue.text, cfg.max_lexical_seeds, eligible=eligible):
                         if hit.score >= 0.35: add_seed(hit.entity_id, hit.score, "semantic:vector")
-                if not seeds and RetrieverKind.SEMANTIC in analysis.fallback and hasattr(self.index, "semantic"):
-                    for hit in self.index.semantic(cue.text, min(8, cfg.max_lexical_seeds)):
+                # For anchored relational queries, an anchor-dominated deterministic
+                # vector is not evidence for the predicate and must not defeat abstention.
+                if (not seeds and RetrieverKind.SEMANTIC in analysis.fallback
+                        and hasattr(self.index, "semantic") and not (anchors and predicates)):
+                    for hit in self.index.semantic(cue.text, min(8, cfg.max_lexical_seeds), eligible=eligible):
                         if hit.score >= 0.70: add_seed(hit.entity_id, hit.score, "semantic:fallback")
         except RetrievalError:
             raise
@@ -112,7 +223,12 @@ class RetrievalService:
             raise RetrievalError(RetrievalErrorCode.REPOSITORY_FAILURE, "seed generation failed") from exc
         marks["seed"] = (perf_counter() - started) * 1000
         if not seeds:
-            return RecallResult(request.request_id, (), (), (("seeds", 0), ("edges", 0), ("candidates", 0)),
+            return RecallResult(request.request_id, (), (), (("seeds", 0), ("edges", 0), ("candidates", 0),
+                                ("discovery_generated", discovery_generated),
+                                ("discovery_admitted", discovery_admitted),
+                                ("discovery_filtered", discovery_filtered),
+                                ("authorized_candidates", 0), ("returned", 0),
+                                ("abstention_reason", "NO_ADMITTED_EVIDENCE")),
                                 (("seed", marks["seed"]), ("expansion", 0.0), ("scoring", 0.0),
                                  ("total", (perf_counter() - started) * 1000)),
                                 (), cfg.version, "INSUFFICIENT_EVIDENCE",
@@ -137,10 +253,14 @@ class RetrievalService:
             neighbors: list[tuple[Association, NodeId]] = []
             for edge in self.memory.associations_for(current):
                 other = edge.target_id if edge.source_id == current else edge.source_id
-                if self.memory.exists(other):
-                    if hasattr(self.memory,"lifecycle") and self.memory.lifecycle(other).state is not LifecycleState.ACTIVE: continue
+                current_visible, _ = visible(current)
+                other_visible, other_entity = visible(other)
+                # Associations have no independent security envelope.  Their effective
+                # policy is therefore the conjunction of both endpoint policies.  An
+                # ineligible endpoint makes the edge non-existent for this request.
+                if current_visible and other_visible:
                     neighbors.append((edge, other))
-                else:
+                elif other_entity is None and cue.access_context is None:
                     missing_edges += 1
             neighbors.sort(key=lambda pair: (-pair[0].strength if pair[0].strength is not None else -1.0,
                                              str(pair[0].id), _key(pair[1])))
@@ -179,9 +299,6 @@ class RetrievalService:
         weights = dict(cfg.weights)
         candidates = []
         now = cue.temporal_context
-        query_now = utc_now()
-        valid_at = cue.valid_at or query_now
-        knowledge_at = cue.knowledge_at or query_now
         for entity_id in sorted(activation, key=_key):
             entity = self.memory.get(entity_id)
             if entity is None:
@@ -336,8 +453,14 @@ class RetrievalService:
         return RecallResult(request.request_id, ranked, working,
                             (("seeds", len(seeds)), ("candidates", len(activation)),
                              ("edges", edges), ("missing_edges", missing_edges),
-                             ("generated_candidates", getattr(self.index, "generated_candidates", len(seeds))),
-                             ("ranked_candidates", getattr(self.index, "ranked_candidates", len(seeds))),
+                             # Index-global counters include policy-ineligible documents and
+                             # must never become an authorization side channel.
+                             ("generated_candidates", discovery_generated),
+                             ("ranked_candidates", discovery_admitted),
+                             ("discovery_generated", discovery_generated),
+                             ("discovery_admitted", discovery_admitted),
+                             ("discovery_filtered", discovery_filtered),
+                             ("authorized_candidates", len(candidates)),
                              ("returned", len(ranked))),
                             (("seed", marks["seed"]), ("expansion", marks["expansion"]),
                              ("scoring", marks["scoring"]), ("total", (perf_counter() - started) * 1000)),

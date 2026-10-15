@@ -42,6 +42,37 @@ def test_exact_lexical_entity_semantic_and_incremental_indexing():
     assert later in {hit.entity_id for hit in index.semantic("Juniper release automobile", 4)}
 
 
+def test_entity_hits_report_only_actual_matches_and_relations_must_match():
+    repo, add = memory()
+    location = add("Atlas-17 headquarters is in Northport")
+    add("Atlas-17 publishes maintenance notes")
+    other = add("Boreal-22 headquarters is in Southport")
+    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
+
+    entity_hits = {hit.entity_id: hit for hit in index.entity("Where is Atlas-17?", 10)}
+    assert set(entity_hits[location].matched_tokens) == {"atlas", "17"}
+    assert other not in entity_hits
+
+    relevant = service.recall(RecallRequest(RecallCue(text="Where is Atlas-17 headquarters?")))
+    assert [item.entity_id for item in relevant.candidates] == [location]
+    absent = service.recall(RecallRequest(RecallCue(text="What launch password belongs to Atlas-17?")))
+    assert not absent.candidates and absent.evidence_status == "INSUFFICIENT_EVIDENCE"
+
+
+def test_fixed_relation_equivalence_recovers_paraphrase_without_relation_drift():
+    repo, add = memory()
+    manager = add("Avery supervises Atlas-17")
+    location = add("Atlas-17 is situated in Northport")
+    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
+
+    managed = service.recall(RecallRequest(RecallCue(text="Who manages Atlas-17?")))
+    assert [item.entity_id for item in managed.candidates] == [manager]
+    located = service.recall(RecallRequest(RecallCue(text="Where is Atlas-17 located?")))
+    assert [item.entity_id for item in located.candidates] == [location]
+    ownership = service.recall(RecallRequest(RecallCue(text="Who owns Atlas-17?")))
+    assert not ownership.candidates
+
+
 def test_abstention_duplicate_context_and_associative_explainability():
     repo, add = memory(); first = add("orchard budget exact"); duplicate = add("orchard budget exact")
     index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
@@ -74,3 +105,29 @@ def test_semantic_ablation_is_deterministic():
     first = index.search(provider.embed(("automobile lead",))[0], 3)
     second = index.search(provider.embed(("automobile lead",))[0], 3)
     assert first == second and {item[0] for item in first[:2]} == {ids[0], ids[1]}
+
+
+def test_long_claim_discovers_multi_term_evidence_without_mandatory_capitalized_anchor():
+    repo, add = memory()
+    evidence = add("Dietary nitrate supplementation reduces resting blood pressure in healthy adults")
+    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
+    result = service.recall(RecallRequest(RecallCue(
+        text="Scientific studies report dietary nitrate can reduce resting pressure among adults"
+    )))
+    assert [item.entity_id for item in result.candidates] == [evidence]
+    diagnostics = dict(result.diagnostics)
+    assert diagnostics["discovery_admitted"] >= 1
+    assert diagnostics["authorized_candidates"] == 1
+
+
+def test_long_claim_single_generic_overlap_is_filtered_with_safe_diagnostics():
+    repo, add = memory()
+    add("Dietary nitrate supplementation reduces resting blood pressure in healthy adults")
+    index = InvertedSeedIndex(repo); index.rebuild(); service = RetrievalService(repo, index)
+    result = service.recall(RecallRequest(RecallCue(
+        text="Scientific archives discuss unrelated planetary geology and healthy ecosystems"
+    )))
+    assert result.candidates == ()
+    diagnostics = dict(result.diagnostics)
+    assert diagnostics["discovery_filtered"] >= 1
+    assert diagnostics["abstention_reason"] == "NO_ADMITTED_EVIDENCE"

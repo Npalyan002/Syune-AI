@@ -1,8 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
+import syune.adapters.aml.v1 as aml
 from syune.adapters.aml import AdapterSettings, create_app
 
 
@@ -121,6 +124,25 @@ def test_identical_replay_and_global_conflict(tmp_path):
     assert conflict.json() == {"detail": {"reason": "request_id conflict"}}
 
 
+def test_global_conflict_is_precommit_and_does_not_rebuild_runtime(tmp_path, caplog):
+    with caplog.at_level("INFO", logger="syune.aml.operations"):
+        with make_client(tmp_path) as client:
+            payload = add_payload(messages=[{"role": "user", "content": "stable payload"}])
+            assert client.post("/add", headers=AUTH, json=payload).status_code == 200
+            before = client.post("/search", headers=AUTH,
+                                 json=search_payload(query="stable payload")).json()
+            conflict = client.post("/add", headers=AUTH,
+                                   json=add_payload(user_id="different-user"))
+            assert conflict.status_code == 409
+            after = client.post("/search", headers=AUTH,
+                                json=search_payload(query="stable payload")).json()
+    recovery_rebuilds = [record for record in caplog.records
+                         if '\"event\":\"index_rebuild\"' in record.message
+                         and '\"recovery\":true' in record.message]
+    assert not recovery_rebuilds
+    assert before == after
+
+
 def test_restart_persistence_and_immediate_searchability(tmp_path):
     with make_client(tmp_path) as client:
         assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
@@ -171,6 +193,124 @@ def test_concurrent_add_and_search_use_bounded_owned_connections(tmp_path):
             statuses = tuple(pool.map(lambda pair: pair[0](pair[1]),
                                       ((add, 1), (search, 0), (add, 2), (search, 0))))
     assert statuses == (200, 200, 200, 200)
+
+
+def test_runtime_opens_once_for_repeated_warm_searches(tmp_path, monkeypatch):
+    original = aml.Syune.open
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(aml.Syune, "open", counted)
+    with make_client(tmp_path, max_concurrency=16) as client:
+        assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = tuple(pool.map(
+                lambda _: client.post("/search", headers=AUTH, json=search_payload()),
+                range(16),
+            ))
+    assert calls == 1
+    assert all(response.status_code == 200 and response.json()["data"] for response in responses)
+
+
+def test_searches_execute_concurrently_on_independent_readers(tmp_path, monkeypatch):
+    original = aml.Syune.recall
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def observed(self, *args, **kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            time.sleep(.05)
+            return original(self, *args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(aml.Syune, "recall", observed)
+    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
+        assert client.post("/add", headers=AUTH, json=add_payload()).status_code == 200
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = tuple(pool.map(
+                lambda _: client.post("/search", headers=AUTH, json=search_payload()),
+                range(16),
+            ))
+    assert maximum > 1
+    assert all(response.status_code == 200 and response.json()["data"] for response in responses)
+
+
+def test_repeated_mixed_bursts_preserve_visibility(tmp_path):
+    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
+        for burst in range(3):
+            def request(index):
+                if index < 8:
+                    marker = burst * 8 + index
+                    return client.post("/add", headers=AUTH, json=add_payload(
+                        f"mixed-{marker}", messages=[{
+                            "role": "user", "content": f"mixed visibility marker {marker}"
+                        }]))
+                return client.post("/search", headers=AUTH,
+                                   json=search_payload(query="mixed visibility marker"))
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                responses = tuple(pool.map(request, range(16)))
+            assert all(response.status_code == 200 for response in responses)
+        found = client.post("/search", headers=AUTH,
+                            json=search_payload(query="mixed visibility marker", top_k=100))
+    assert found.status_code == 200
+    assert len(found.json()["data"]) == 24
+
+
+def test_sixteen_concurrent_adds_are_visible_and_idempotent(tmp_path):
+    with make_client(tmp_path, max_concurrency=16, queue_wait_seconds=5) as client:
+        def add(index):
+            return client.post("/add", headers=AUTH, json=add_payload(
+                f"burst-{index}", messages=[{
+                    "role": "user", "content": f"unique burst marker {index}"
+                }],
+            ))
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            responses = tuple(pool.map(add, range(16)))
+        found = client.post("/search", headers=AUTH,
+                            json=search_payload(query="unique burst marker", top_k=100))
+    assert all(response.status_code == 200 for response in responses)
+    assert found.status_code == 200
+    assert len(found.json()["data"]) == 16
+
+
+def test_committed_add_index_failure_recovers_before_retry(tmp_path, monkeypatch):
+    original = aml.Syune.add_batch
+    injected = False
+
+    def fail_after_commit(self, *args, **kwargs):
+        nonlocal injected
+        result = original(self, *args, **kwargs)
+        if not injected:
+            injected = True
+            raise RuntimeError("synthetic post-commit index failure")
+        return result
+
+    monkeypatch.setattr(aml.Syune, "add_batch", fail_after_commit)
+    payload = add_payload("recoverable")
+    settings = AdapterSettings(
+        state_root=(tmp_path / "aml-evaluation").resolve(),
+        bearer_token=TOKEN,
+    )
+    with TestClient(create_app(settings), raise_server_exceptions=False) as client:
+        failed = client.post("/add", headers=AUTH, json=payload)
+        retried = client.post("/add", headers=AUTH, json=payload)
+        found = client.post("/search", headers=AUTH, json=search_payload())
+    assert failed.status_code == 500
+    assert retried.status_code == 200
+    assert found.status_code == 200 and found.json()["data"]
 
 
 def test_oversized_payload_is_rejected_before_parsing(tmp_path):

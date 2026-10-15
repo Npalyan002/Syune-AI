@@ -1,0 +1,13 @@
+.git
+.venv
+.aml09a-venv
+.aml09a-cache
+.pytest_cache
+__pycache__
+*.pyc
+benchmarks
+contracts
+docs
+examples
+tests
+deploy/aml09b1

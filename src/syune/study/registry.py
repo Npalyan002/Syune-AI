@@ -66,7 +66,11 @@ class SqliteStudyRegistry:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.path)
+        # A lifecycle-managed runtime may be created, used, and closed by
+        # different application worker threads. Operations remain coordinated by
+        # the owning runtime; disabling SQLite's creator-thread check permits the
+        # connection to be closed safely during application shutdown.
+        self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
         version=self._db.execute("PRAGMA user_version").fetchone()[0]

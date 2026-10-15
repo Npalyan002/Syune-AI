@@ -6,6 +6,7 @@ from enum import Enum
 import json
 from pathlib import Path
 import sqlite3
+import threading
 from typing import Any, Mapping
 
 _SECRET_KEYS = frozenset({"authorization", "api_key", "apikey", "credential", "secret",
@@ -46,8 +47,9 @@ class SQLiteAuditStore:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path; self.db = sqlite3.connect(path, check_same_thread=False)
+        self._lock = threading.RLock()
         self.db.row_factory = sqlite3.Row
-        with self.db:
+        with self._lock, self.db:
             self.db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS audit_events(
@@ -86,7 +88,7 @@ class SQLiteAuditStore:
                   json.dumps(_safe(authorization_decisions)), json.dumps(_safe(resource_ids)),
                   json.dumps(_safe(context_ids)), lifecycle_action, logical_call_id,
                   json.dumps(_safe(detail or {}), sort_keys=True))
-        with self.db:
+        with self._lock, self.db:
             cursor = self.db.execute("INSERT INTO audit_events(operation_id,timestamp,operation_type,outcome,correlation_id,principal_json,purpose,scopes_json,authorization_json,resource_ids_json,context_ids_json,lifecycle_action,logical_call_id,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
         return int(cursor.lastrowid)
 
@@ -99,13 +101,15 @@ class SQLiteAuditStore:
             if value is not None: where.append(f"{column}=?"); args.append(value)
         sql = "SELECT * FROM audit_events" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY sequence DESC LIMIT ?"
         args.append(limit)
-        rows = self.db.execute(sql, args).fetchall()
+        with self._lock:
+            rows = self.db.execute(sql, args).fetchall()
         return tuple(AuditEvent(row["sequence"], row["operation_id"], row["timestamp"],
             row["operation_type"], row["outcome"], row["correlation_id"], json.loads(row["principal_json"]),
             row["purpose"], json.loads(row["scopes_json"]), tuple(json.loads(row["authorization_json"])),
             tuple(json.loads(row["resource_ids_json"])), tuple(json.loads(row["context_ids_json"])),
             row["lifecycle_action"], row["logical_call_id"], json.loads(row["detail_json"])) for row in rows)
 
-    def close(self) -> None: self.db.close()
+    def close(self) -> None:
+        with self._lock: self.db.close()
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
